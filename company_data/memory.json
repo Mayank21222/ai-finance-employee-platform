@@ -13,5 +13,6 @@
       "payment_terms": "net 30"
     }
   },
-  "notes": []
+  "notes": [],
+  "note": "test"
 }
