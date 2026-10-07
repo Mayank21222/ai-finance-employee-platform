@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from html import escape
+from pathlib import Path
 
 NAV = [
     ("runs", "/runs", "Run console"),
