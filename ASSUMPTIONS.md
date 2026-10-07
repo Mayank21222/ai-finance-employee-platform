@@ -13,7 +13,7 @@
 2. **No meta-prompt files.** The session instruction forbids creating new
    meta-prompt/instruction files. The `prompts/` directory is still created
    because the task requires the *runtime agent's* prompts to live as files
-   there; these are program assets loaded by `operator/nodes`, not new
+   there; these are program assets loaded by `ai_operator/nodes`, not new
    instruction files for the session.
 3. **Model provider via environment.** `MODEL_PROVIDER` selects `openai`,
    `anthropic`, or `stub`. The `stub` provider is a deterministic scripted model
@@ -26,7 +26,7 @@
 6. **Approval threshold** is evaluated on the invoice amount parsed as a number:
    `amount > 50000` (INR) requires human approval, per `company_data/policies.md`.
 7. **Failure switches** are toggled per run with `POST /debug/failures` (or the
-   `--failures` flag of `operator.run`), not by editing app code.
+   `--failures` flag of `ai_operator.run`), not by editing app code.
 8. **Ask-human** and **policy approval** both use LangGraph `interrupt()`; the CLI
    supplies the resume value. Clarification questions and approvals are separate
    trace event types.

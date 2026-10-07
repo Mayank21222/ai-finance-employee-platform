@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -45,7 +46,9 @@ def app_url():
 )
 def test_operator_completes_task(app_url, failures):
     tag = (failures or "happy").replace(",", "_").replace(" ", "")
-    run_id = f"test_e2e_{tag}"
+    # Unique per invocation: checkpoints.db keys on run_id, and LangGraph would
+    # otherwise resume a previously completed thread instead of starting fresh.
+    run_id = f"test_e2e_{tag}_{uuid.uuid4().hex[:8]}"
     env = {
         **os.environ,
         "MODEL_PROVIDER": "stub",
