@@ -9,7 +9,7 @@ verifier reading real app state.
 
 - `company_data/` — vendor invoices, `policies.md`, `procedures.md`, persistent memory
 - `mock_app/` — FastAPI payables app (form + list + read-only API) with failure switches
-- `operator/` — graph, state, nodes, tools, permissions, verifier, tracing, model client
+- `ai_operator/` — graph, state, nodes, tools, permissions, verifier, tracing, model client
 - `prompts/` — six-part prompt files (role, task, constraints, output format, examples, fallback)
 - `runs/` — per-run `trace.jsonl`, evidence screenshots, final `report.json`
 - `tests/` — verifier, permissions, registry, and a stubbed-model end-to-end test

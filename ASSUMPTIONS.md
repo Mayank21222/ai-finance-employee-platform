@@ -3,6 +3,13 @@
 1. **Repo root is the workspace root.** The requested tree's `ai-operator/` is the
    repository name itself, so files live directly at the repository root rather
    than inside a nested `ai-operator/` folder.
+1a. **Package renamed `operator` → `ai_operator`.** This Python preloads the
+   stdlib `operator` module into `sys.modules` during interpreter startup, so a
+   top-level package named `operator/` is unreachable (verified: `import
+   operator` resolves to the stdlib file; `python -m operator.run` cannot work).
+   The folder is therefore `ai_operator/` — layout otherwise matches the
+   requested tree; this is noted per the fallback rule because it is an
+   import-plumbing decision, not an architecture change.
 2. **No meta-prompt files.** The session instruction forbids creating new
    meta-prompt/instruction files. The `prompts/` directory is still created
    because the task requires the *runtime agent's* prompts to live as files
