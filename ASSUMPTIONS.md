@@ -34,3 +34,15 @@
    through tools; writes are `reversible_write` permission level.
 10. **Step budget** counts graph decision steps (max 25); each tool action has at
     most 2 retries and a timeout from `TOOL_TIMEOUT_SECONDS`.
+11. **`memory.py` lives at `ai_operator/tools/memory.py`** rather than as a
+    package-level module. The requested layout says "roughly like this", and
+    the memory implementation is exactly a pair of tools (`read_memory`,
+    `write_memory`) registered through the tool registry, so it sits with the
+    other tools. Functionality (persistent `company_data/memory.json`,
+    reversible-write permission) is unchanged.
+12. **`ask_human` is a decision action, not a registered tool.** The mandated
+    Decision JSON (Output Format section) defines `action_type` including
+    `ask_human`, so the decide step emits that action, `graph.py` routes it to
+    the ask node, and a LangGraph `interrupt()` pauses for the answer. The
+    permission layer's `tool_name == "ask_human"` special case remains as a
+    safety net should it ever arrive through the tool path.
