@@ -287,7 +287,7 @@ def _load_documents(paths: list[str]) -> list[str]:
         try:
             body = path.read_text(encoding="utf-8")[:DOCUMENT_CHAR_LIMIT] \
                 if path.is_file() else "(missing document)"
-        except OSError:
-            body = "(missing document)"
+        except (OSError, ValueError):
+            body = "(unreadable document: not utf-8 text)"
         loaded.append(f"{raw}:\n{body}")
     return loaded
