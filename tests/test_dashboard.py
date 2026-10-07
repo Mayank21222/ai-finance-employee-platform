@@ -392,3 +392,36 @@ def test_mermaid_diagram_marks_edges():
     assert "ap_agent -. fallback .-> report" in out
     assert "check_invoice -- match -->" in out
     assert "check_invoice -- mismatch -->" in out
+
+
+def test_message_node_create_cycle():
+    original = SHIPPED_CONFIG.read_text()
+    try:
+        resp = client.post("/messages", data={
+            "node_id": "ask_amount", "template": "Need amount for {{vars.x}}",
+            "next_node_id": "ask_amount", "fallback_next": "report"},
+            follow_redirects=False)
+        assert resp.status_code == 303
+        node = next(n for n in _get_cfg()["nodes"]
+                    if n["node_id"] == "ask_amount")
+        assert node["type"] == "message"
+        assert node["next_node_ids"] == ["ask_amount"]  # self-loop allowed
+
+        page = client.get("/messages").text
+        assert "ask_amount" in page and "Need amount for" in page
+
+        # a template var with no prior save_as is rejected - the validator
+        # catches it when the node becomes reachable from the start node
+        resp = client.post("/messages", data={
+            "node_id": "ask_due", "template": "{{vars.ghost}}",
+            "next_node_id": "report", "fallback_next": ""},
+            follow_redirects=False)
+        assert resp.status_code == 303  # still unreachable -> accepted
+        resp = client.post("/flow/connections", data={
+            "source": "ap_agent", "destination": "ask_due"},
+            follow_redirects=False)
+        assert resp.status_code == 400
+        assert "ghost" in resp.text
+    finally:
+        if SHIPPED_CONFIG.read_text() != original:
+            SHIPPED_CONFIG.write_text(original)

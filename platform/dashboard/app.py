@@ -430,6 +430,29 @@ def messages_page(message: str = "") -> str:
     return html.messages_page(flowcfg.load_cfg(), message=message)
 
 
+@app.post("/messages", include_in_schema=False)
+def messages_create(node_id: str = Form(...), template: str = Form(...),
+                    next_node_id: str = Form(...),
+                    fallback_next: str = Form("")):
+    cfg = flowcfg.load_cfg()
+    if any(n.get("node_id") == node_id for n in cfg.get("nodes", [])):
+        return HTMLResponse(
+            html.messages_page(
+                cfg, message=f"Node id '{node_id}' already exists."),
+            status_code=400,
+        )
+    cfg.setdefault("nodes", []).append({
+        "type": "message", "node_id": node_id, "template": template,
+        "next_node_ids": [next_node_id],
+        "fallback_next": fallback_next or None,
+    })
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        return HTMLResponse(html.messages_page(cfg, message=errors[0]),
+                            status_code=400)
+    return RedirectResponse("/messages", status_code=303)
+
+
 @app.post("/messages/{node_id}", include_in_schema=False)
 def messages_edit(node_id: str, template: str = Form(...),
                   next_node_id: str = Form(...),

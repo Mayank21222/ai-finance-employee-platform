@@ -563,6 +563,22 @@ def messages_page(cfg: dict, message: str = "") -> str:
   </form>
 </div>""")
     msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    new_opts = "".join(f'<option value="{esc(i)}">{esc(i)}</option>'
+                       for i in node_ids)
+    create = f"""
+<h2>New message node</h2>
+<form method="post" action="/messages" class="row">
+  <input name="node_id" placeholder="node id (e.g. ask_amount)" required
+         pattern="[A-Za-z0-9_]+">
+  <input name="template" placeholder="template, e.g. Amount for {{{{vars.x}}}}?"
+         style="min-width:280px" required>
+  <select name="next_node_id">{new_opts}</select>
+  <select name="fallback_next"><option value="">no fallback</option>
+    {new_opts}</select>
+  <button class="primary">Create message node</button>
+</form>
+<p class="dim">Next may be the node itself (self-loop); visit limits stop
+runaway loops.</p>"""
     script = """<script>
   document.querySelectorAll(".var-insert").forEach(function (sel) {
     sel.addEventListener("change", function () {
@@ -583,6 +599,7 @@ def messages_page(cfg: dict, message: str = "") -> str:
 <h1>Message nodes</h1>
 {msg}
 {"".join(forms) or '<p class="dim">No message nodes in this flow.</p>'}
+{create}
 {script}""",
         active="messages",
     )
