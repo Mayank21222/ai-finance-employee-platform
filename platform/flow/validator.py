@@ -59,6 +59,11 @@ def validate(flow: Flow) -> list[str]:
                 errors.append(
                     f"Agent node '{node.node_id}' has no outgoing connection."
                 )
+            if node.routes and not node.save_as:
+                errors.append(
+                    f"Agent node '{node.node_id}' has routes but no save_as; "
+                    "routing keys need a saved variable to read."
+                )
             for tool_name in node.tools_enabled:
                 if tool_name not in names():
                     errors.append(

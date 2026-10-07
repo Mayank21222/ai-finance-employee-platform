@@ -326,10 +326,11 @@ def test_agent_edit_and_duplicate_create():
             SHIPPED_CONFIG.write_text(original)
 
 
-def test_messages_page_empty_state_and_edit_404():
+def test_messages_page_lists_message_nodes_and_edit_404():
     resp = client.get("/messages")
     assert resp.status_code == 200
-    assert "No message nodes" in resp.text
+    # Phase 3 config ships a message node (reminder output).
+    assert "reminder_message" in resp.text
     resp = client.post("/messages/ghost", data={
         "template": "x", "next_node_id": "e", "fallback_next": ""},
         follow_redirects=False)
@@ -388,7 +389,7 @@ def test_mermaid_diagram_marks_edges():
     from platform.dashboard.html import mermaid_diagram
 
     out = mermaid_diagram(_get_cfg())
-    assert "start([start]) --> ap_agent" in out
+    assert "start([start]) --> classifier" in out
     assert "ap_agent -. fallback .-> report" in out
     assert "check_invoice -- match -->" in out
     assert "check_invoice -- mismatch -->" in out

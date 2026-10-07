@@ -1,6 +1,6 @@
 {
   "name": "finance_employee",
-  "start_node_id": "ap_agent",
+  "start_node_id": "classifier",
   "session_context": {
     "tenant": "acme",
     "currency": "INR",
@@ -11,9 +11,26 @@
   "nodes": [
     {
       "type": "agent",
+      "node_id": "classifier",
+      "system_prompt": "prompts/agent_classifier.md",
+      "instructions": "Available specialists:\n- ap_agent: invoice entry - enters a vendor invoice into the payables system and hands off to verification.\n- reminder_agent: payment reminder - reads invoices and lists the overdue ones (read-only).\nTask types: invoice_entry, payment_reminder, expense_review, unknown.\nSpecialists: invoice_entry -> ap_agent, payment_reminder -> reminder_agent, expense_review -> ap_agent, unknown -> ap_agent.\nClassify the [TASK] and finish with exactly one task type in expected_outcome.",
+      "documents": [],
+      "tools_enabled": [],
+      "next_node_ids": ["ap_agent"],
+      "fallback_next": "report",
+      "save_as": "task_type",
+      "routes": {
+        "invoice_entry": "ap_agent",
+        "payment_reminder": "reminder_agent",
+        "expense_review": "ap_agent",
+        "unknown": "ap_agent"
+      }
+    },
+    {
+      "type": "agent",
       "node_id": "ap_agent",
       "system_prompt": "prompts/agent_ap.md",
-      "instructions": "1. Search company_data for the vendor's invoice files and read every candidate.\n2. Pick the invoice with the latest invoice date and note its amount and due date.\n3. Read company_data/policies.md and compare the amount against the approval threshold.\n4. Open the payables add-invoice page and read it before typing.\n5. Fill vendor, amount and due date using the selectors the page actually exposes.\n6. Submit the form; if it fails, read the page and recover.\n7. Hand off to verification and act on its result.",
+      "instructions": "You are the invoice entry specialist.\n1. Search company_data for the vendor's invoice files and read every candidate.\n2. Pick the invoice with the latest invoice date and note its amount and due date.\n3. Read company_data/policies.md and compare the amount against the approval threshold.\n4. Open the payables add-invoice page and read it before typing.\n5. Fill vendor, amount and due date using the selectors the page actually exposes.\n6. Submit the form; if it fails, read the page and recover.\n7. Hand off to verification and act on its result.",
       "documents": [
         "company_data/procedures.md",
         "company_data/policies.md"
@@ -33,6 +50,34 @@
       "next_node_ids": ["check_invoice"],
       "fallback_next": "report",
       "save_as": "ap_answer"
+    },
+    {
+      "type": "agent",
+      "node_id": "reminder_agent",
+      "system_prompt": "prompts/agent_reminder.md",
+      "instructions": "Read-only payment reminder task:\n1. List the invoice sources: search company_data/invoices and read every invoice file there.\n2. For each invoice record invoice number, vendor, amount and due date.\n3. Compare each due date against today; collect every invoice whose due date is in the past.\n4. Finish with a plain-text list of the overdue invoices, one per line.",
+      "documents": [
+        "company_data/policies.md"
+      ],
+      "tools_enabled": [
+        "click",
+        "navigate",
+        "read_file",
+        "read_memory",
+        "read_page",
+        "screenshot",
+        "search_files"
+      ],
+      "next_node_ids": ["reminder_message"],
+      "fallback_next": "report",
+      "save_as": "overdue_list"
+    },
+    {
+      "type": "message",
+      "node_id": "reminder_message",
+      "template": "Payment reminder list (overdue invoices):\n{{vars.overdue_list}}",
+      "next_node_ids": ["report"],
+      "fallback_next": "report"
     },
     {
       "type": "verify",

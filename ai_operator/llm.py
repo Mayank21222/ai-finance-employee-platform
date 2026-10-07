@@ -106,6 +106,14 @@ class StubClient:
         history = self._section(prompt, "HISTORY")
         observation = self._section(prompt, "LAST OBSERVATION")
         task = self._section(prompt, "TASK")
+        # Classifier node: instructions list the available specialists. The
+        # stub classifies by task keywords; a real model reads the same text.
+        instructions = self._section(prompt, "AGENT INSTRUCTIONS")
+        if "Available specialists" in instructions:
+            return self._classify(task)
+        # Reminder specialist persona: read invoices, list overdue ones.
+        if "payment reminder specialist" in prompt.lower():
+            return self._remind(history)
         # Result-aware parsing: only count completed ACTIONS, never output text.
         called = re.findall(r"^\s*\d+\.\s+(\w+)\(", history, flags=re.M)
         read_paths = re.findall(r"read_file\(path=['\"]?([\w./-]+)", history)
@@ -183,6 +191,88 @@ class StubClient:
                 "action_type": "finish", "tool_name": None, "tool_args": {},
                 "plan_update": None,
                 "expected_outcome": "run ends verified_complete with evidence"}
+
+    @staticmethod
+    def _classify(task: str) -> dict:
+        """Classifier node: pick a task type from the request wording."""
+        t = task.lower()
+        if any(k in t for k in ("remind", "reminder", "overdue")):
+            kind = "payment_reminder"
+        elif "expense" in t or "spending" in t:
+            kind = "expense_review"
+        elif any(k in t for k in ("invoice", "enter", "bill", "vendor")):
+            kind = "invoice_entry"
+        else:
+            kind = "unknown"
+        return {
+            "thought": f"Request wording matches task type '{kind}'.",
+            "action_type": "finish",
+            "tool_name": None,
+            "tool_args": {},
+            "plan_update": None,
+            "expected_outcome": kind,
+        }
+
+    @staticmethod
+    def _remind(history: str) -> dict:
+        """Reminder specialist: read every invoice file, list overdue ones."""
+        files = [
+            "company_data/invoices/acme_2026-05-10.txt",
+            "company_data/invoices/acme_2026-06-15.txt",
+            "company_data/invoices/acme_2026-07-20.txt",
+            "company_data/invoices/globex_2026-07-05.txt",
+            "company_data/invoices/initech_2026-06-28.txt",
+        ]
+        called = re.findall(r"^\s*\d+\.\s+(\w+)\(", history, flags=re.M)
+        read_paths = re.findall(r"read_file\(path=['\"]?([\w./-]+)", history)
+        if "search_files" not in called:
+            return StubClient._tool(
+                "search_files", {"query": "invoice", "path": "company_data/invoices"},
+                "Find every invoice file first.",
+            )
+        nxt = next((f for f in files if f not in read_paths), None)
+        if nxt:
+            return StubClient._tool(
+                "read_file", {"path": nxt}, "Read the next invoice file."
+            )
+        from datetime import date
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[1]
+        today = date.today()
+        overdue = []
+        for rel in files:
+            path = repo / rel
+            if not path.is_file():
+                continue
+            body = path.read_text(encoding="utf-8", errors="replace")
+            due_m = re.search(r"Due Date:\s*(\d{4}-\d{2}-\d{2})", body)
+            if not due_m:
+                continue
+            try:
+                due = date.fromisoformat(due_m.group(1))
+            except ValueError:
+                continue
+            if due >= today:
+                continue
+            num = re.search(r"Invoice Number:\s*(.+)", body)
+            vendor = re.search(r"Vendor:\s*(.+)", body)
+            amount = re.search(r"Amount:\s*(.+)", body)
+            overdue.append(
+                f"{(num.group(1) if num else '?').strip()} - "
+                f"{(vendor.group(1) if vendor else '?').strip()} - "
+                f"{(amount.group(1) if amount else '?').strip()} - "
+                f"due {due_m.group(1)} (overdue)"
+            )
+        summary = "\n".join(overdue) if overdue else "no overdue invoices"
+        return {
+            "thought": "All invoice files read; listed every past-due invoice.",
+            "action_type": "finish",
+            "tool_name": None,
+            "tool_args": {},
+            "plan_update": None,
+            "expected_outcome": summary,
+        }
 
     @staticmethod
     def _tool(name: str, args: dict, thought: str) -> dict:

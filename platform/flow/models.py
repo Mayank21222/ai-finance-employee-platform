@@ -35,6 +35,14 @@ class AgentNode(BaseModel):
     """Where this node routes when the run fails or a limit is hit."""
     save_as: str | None = None
     """Optional session variable name to save this agent's answer into."""
+    routes: dict[str, str] = Field(default_factory=dict)
+    """Phase 3: value -> node_id routing keyed on the saved save_as variable.
+
+    When the agent finishes, the flow leaves through routes[variable value]
+    (matched exactly, case-insensitively after stripping); an unmatched value
+    leaves through next_node_ids/fallback_next as before. This is how the
+    Classifier picks a specialist without any code change.
+    """
 
 
 class MessageNode(BaseModel):
@@ -106,6 +114,10 @@ class Flow(BaseModel):
             ids = list(node.next_node_ids)
             if node.fallback_next:
                 ids.append(node.fallback_next)
+            # Route targets are real outgoing connections too: validation and
+            # the template-variable BFS must be able to reach them.
+            if isinstance(node, AgentNode):
+                ids.extend(node.routes.values())
             return ids
         if isinstance(node, VerifyNode):
             return [node.match_next, node.mismatch_next]

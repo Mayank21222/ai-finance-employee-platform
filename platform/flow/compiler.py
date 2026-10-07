@@ -144,22 +144,29 @@ def _add_agent(
         route_after_entry,
         {"decide": f"{nid}/decide", "fallback": node.fallback_next or first_end},
     )
+    edges: dict[str, str] = {
+        "execute": f"{nid}/execute",
+        "ask": f"{nid}/ask",
+        "next": Flow.primary_next(node) or first_end,
+        "fallback": node.fallback_next or first_end,
+    }
+    for value, target in node.routes.items():
+        edges[f"route:{value}"] = target
     graph.add_conditional_edges(
         f"{nid}/decide",
-        _agent_router(),
-        {
-            "execute": f"{nid}/execute",
-            "ask": f"{nid}/ask",
-            "next": Flow.primary_next(node) or first_end,
-            "fallback": node.fallback_next or first_end,
-        },
+        _agent_router(node),
+        edges,
     )
     graph.add_edge(f"{nid}/execute", f"{nid}/decide")
     graph.add_edge(f"{nid}/ask", f"{nid}/decide")
 
 
-def _agent_router():
-    """Route one decide step of an agent: stay in the loop or leave the node."""
+def _agent_router(node: AgentNode):
+    """Route one decide step of an agent: stay in the loop or leave the node.
+
+    Leaving prefers node.routes[save_as value] (Phase-3 variable routing, so
+    a classifier picks its specialist) and falls back to the primary next.
+    """
 
     def route(state: AgentState) -> str:
         if state.get("status") != "running":
@@ -170,6 +177,15 @@ def _agent_router():
             return "execute"
         if action == "ask_human":
             return "ask"
+        if node.routes and node.save_as:
+            value = str(
+                (state.get("variables") or {}).get(node.save_as, "")
+            ).strip()
+            if value in node.routes:
+                return f"route:{value}"
+            if value.lower() in {k.lower() for k in node.routes}:
+                hit = next(k for k in node.routes if k.lower() == value.lower())
+                return f"route:{hit}"
         return "next"
 
     return route
