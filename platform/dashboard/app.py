@@ -143,12 +143,17 @@ def run_detail(run_id: str):
     if row is None:
         return HTMLResponse(html.not_found(f"No run '{run_id}'."), status_code=404)
     handle = runner.get(run_id)
+    events = _trace_events(run_id)
     if handle is not None:
         status = handle.status
         waiting = handle.status == "waiting_input"
+        interrupt_kind = ""
         question = ""
         if handle.interrupt:
-            question = str(handle.interrupt.get("question", handle.interrupt))
+            interrupt_kind = str(handle.interrupt.get("kind", "clarification"))
+            if interrupt_kind != "approval":
+                question = str(handle.interrupt.get(
+                    "question", handle.interrupt))
         error = handle.error
         state = {"running": "running", "waiting_input": "waiting_approval",
                  "cancelled": "interrupted", "failed": "failed"}.get(
@@ -158,6 +163,7 @@ def run_detail(run_id: str):
     else:
         status = str(row.get("status") or "unknown")
         waiting = False
+        interrupt_kind = ""
         question = ""
         error = row.get("error")
         state = str(row.get("state") or "")
@@ -167,21 +173,27 @@ def run_detail(run_id: str):
                         and (handle is None or handle.terminal))
     resume_question = ""
     if orphaned_waiting:
-        for ev in reversed(_trace_events(run_id)):
+        for ev in reversed(events):
             if ev.get("event") in ("approval_requested", "human_input_requested"):
                 resume_question = str(ev.get("question", ""))
                 break
     session = db.get_session(int(row["session_id"])) if row.get("session_id") else None
     run_active = handle is not None and not handle.terminal
+    # Phase 3: an approval interrupt renders as a decision card; only
+    # clarifications keep the free-text answer form.
+    approval_panel = html.approval_panel_html(
+        run_id, session, events,
+        visible=(waiting and interrupt_kind == "approval"))
+    answer_waiting = waiting and interrupt_kind != "approval"
     flow = load_flow(DEFAULT_FLOW_PATH)
     agents_html = html.agents_fragment(
         _agent_states(run_id, flow, run_active), run_active)
     return html.run_detail_page(
         run_id=run_id, task=str(row.get("task") or ""), status=status,
-        session=session, waiting=waiting, question=question,
+        session=session, waiting=answer_waiting, question=question,
         report=_report(run_id), error=error, agents_html=agents_html,
         run_active=run_active, state=state, resume=orphaned_waiting,
-        resume_question=resume_question,
+        resume_question=resume_question, approval_panel=approval_panel,
     )
 
 
@@ -223,7 +235,7 @@ async def run_events(run_id: str):
 
 
 @app.post("/runs/{run_id}/answer", include_in_schema=False)
-def answer_run(run_id: str, answer: str = Form(...)):
+def answer_run(request: Request, run_id: str, answer: str = Form(...)):
     try:
         runner.answer_run(run_id, answer.strip())
     except RuntimeError as exc:
@@ -234,7 +246,28 @@ def answer_run(run_id: str, answer: str = Form(...)):
                       active="runs"),
             status_code=400,
         )
+    # HTMX (approval card buttons) re-renders the card in place so the
+    # verdict + approver appear without a full round trip.
+    if request.headers.get("HX-Request") == "true":
+        row = db.get_run(run_id)
+        session = (db.get_session(int(row["session_id"]))
+                   if row and row.get("session_id") else None)
+        return HTMLResponse(html.approval_card(
+            run_id, session, _trace_events(run_id)))
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+@app.get("/runs/{run_id}/approval-card", response_class=HTMLResponse,
+         include_in_schema=False)
+def approval_card_fragment(run_id: str):
+    """Poll target for the live approval card (pending or decided)."""
+    row = db.get_run(run_id)
+    if row is None:
+        return HTMLResponse("", status_code=404)
+    session = (db.get_session(int(row["session_id"]))
+               if row.get("session_id") else None)
+    return HTMLResponse(html.approval_card(run_id, session,
+                                           _trace_events(run_id)))
 
 
 @app.post("/runs/{run_id}/cancel", include_in_schema=False)

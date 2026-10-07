@@ -65,6 +65,18 @@ _CSS = """
   .badge.completed { color:var(--ok); border-color:var(--ok); }
   .badge.failed, .badge.needs_human { color:var(--err); border-color:var(--err); }
   .badge.interrupted { color:var(--err); border-color:var(--err); }
+  .approval-card { border:1px solid var(--line); border-radius:6px;
+                   padding:16px; background:#0a0e13; }
+  .approval-card.pending { border-color:var(--warn); }
+  .approval-card.approve { border-color:var(--ok); }
+  .approval-card.reject { border-color:var(--err); }
+  .approval-card .action { color:var(--fg); margin:6px 0; }
+  .approval-card .policy { color:var(--warn); margin:4px 0; }
+  .approval-card ul.summary { margin:8px 0 0; padding-left:18px;
+                              color:var(--dim); }
+  .approval-card .who { font-weight:600; margin-top:8px; }
+  .approval-card .who.approve { color:var(--ok); }
+  .approval-card .who.reject { color:var(--err); }
   .trace { background:#0a0e13; border:1px solid var(--line); border-radius:6px;
            padding:10px; height:340px; overflow-y:auto; font-size:12.5px;
            font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -280,6 +292,124 @@ def answer_form(run_id: str, question: str, show: bool) -> str:
 </div>"""
 
 
+APPROVED_TOKENS = {"y", "yes", "approve", "approved"}
+
+
+def _latest_approval(events: list[dict]) -> tuple[int | None, dict | None]:
+    """The most recent approval interrupt in the trace (Phase 3: policy
+    rule travels in the approval_requested event, not the text input)."""
+    idx: int | None = None
+    found: dict | None = None
+    for i, ev in enumerate(events):
+        if (ev.get("event") == "approval_requested"
+                and ev.get("kind") == "approval"):
+            idx, found = i, ev
+    return idx, found
+
+
+def _decision_after(events: list[dict], idx: int | None) -> dict | None:
+    if idx is None:
+        return None
+    for ev in events[idx + 1:]:
+        if ev.get("event") == "human_input":
+            return ev
+        if ev.get("event") in ("run_error", "cancelled_by_user"):
+            return None
+    return None
+
+
+def _done_so_far(events: list[dict]) -> list[str]:
+    """A compact 'what has the agent done' summary for the approval card."""
+    lines: list[str] = []
+    for ev in events:
+        kind = str(ev.get("event"))
+        if kind == "node_entered" and ev.get("node_type") == "agent":
+            lines.append(f"entered agent {ev.get('node')}")
+        elif kind == "tool_result":
+            ok = "ok" if ev.get("ok") else "ERROR"
+            args = json.dumps(ev.get("args") or {}, default=str)
+            lines.append(f"{ev.get('tool')}({args}) -> {ok}")
+        elif kind == "decision":
+            lines.append(f"decided {ev.get('action_type')}: "
+                         f"{str(ev.get('thought') or '')[:100]}")
+        elif kind == "message_rendered":
+            lines.append(f"message: {str(ev.get('text') or '')[:100]}")
+        elif kind == "finish":
+            lines.append(f"finish: {ev.get('status')}")
+        elif kind == "evidence_captured":
+            lines.append(f"evidence captured: {Path(str(ev.get('path'))).name}")
+    tail = lines[-5:]
+    if len(lines) > 5:
+        tail.insert(0, "…")
+    return tail
+
+
+def approval_card(run_id: str, session: dict | None, events: list[dict]) -> str:
+    """The approval as a decision card, not a text prompt (Phase 3).
+
+    Server-rendered from the trace: the requested action (tool + data), the
+    policy rule that triggered it, a summary of what the agent did so far,
+    and Approve/Reject as hx-post buttons. Once decided, the card stays in
+    the trace and shows the verdict and the approver (session user_role).
+    """
+    idx, req = _latest_approval(events)
+    if req is None:
+        return ""
+    tool = str(req.get("tool_name") or "?")
+    args = json.dumps(req.get("tool_args") or {}, default=str)
+    reason = str(req.get("reason") or req.get("question") or "policy rule")
+    decided = _decision_after(events, idx)
+    who = (str(session.get("user_role"))
+           if session and session.get("user_role") else "unknown")
+    action = f'<p class="mono action">{esc(tool)}({esc(args)})</p>'
+    policy = f'<p class="policy">policy rule: <strong>{esc(reason)}</strong></p>'
+    summary = _done_so_far(events)
+    summary_html = (""
+                    if not summary else
+                    '<p class="dim" style="margin:10px 0 0">done so far</p>'
+                    f'<ul class="summary">'
+                    + "".join(f"<li>{esc(line)}</li>" for line in summary)
+                    + "</ul>")
+    if decided is not None:
+        answer = str(decided.get("answer") or "")
+        approved = answer.strip().lower() in APPROVED_TOKENS
+        verdict = "approved" if approved else "rejected"
+        cls = "approve" if approved else "reject"
+        when = str(decided.get("time") or "")[-19:]
+        return (f'<div class="approval-card {cls}">'
+                f'<h2 style="margin-top:0">approval {verdict}</h2>'
+                f"{action}{policy}{summary_html}"
+                f'<p class="who {cls}">{verdict.capitalize()} by '
+                f"{esc(who)}<span class='dim'> · {esc(when)}</span></p>"
+                "</div>")
+    return (f'<div class="approval-card pending">'
+            f'<h2 style="margin-top:0">approval requested</h2>'
+            f"{action}{policy}{summary_html}"
+            f'<div class="row" style="margin-top:12px">'
+            f'<button class="primary" hx-post="/runs/{esc(run_id)}/answer" '
+            f'hx-vals=\'{{"answer": "approve"}}\' '
+            f'hx-target="#approval-card-body" hx-swap="innerHTML">'
+            f"Approve</button>"
+            f'<button hx-post="/runs/{esc(run_id)}/answer" '
+            f'hx-vals=\'{{"answer": "reject"}}\' '
+            f'hx-target="#approval-card-body" hx-swap="innerHTML">'
+            f"Reject</button>"
+            f"</div></div>")
+
+
+def approval_panel_html(run_id: str, session: dict | None,
+                        events: list[dict], visible: bool = False) -> str:
+    """Live container for the approval card: hx-post buttons land here and
+    hx-get polling keeps a decided card fresh without any page JS."""
+    hidden = "" if visible else ' style="display:none"'
+    return (f'<div class="panel" id="approval-panel"{hidden}>'
+            f'<div id="approval-card-body" '
+            f'hx-get="/runs/{esc(run_id)}/approval-card" '
+            f'hx-trigger="load, every 2000ms" hx-swap="innerHTML">'
+            f"{approval_card(run_id, session, events)}"
+            f"</div></div>")
+
+
 def resume_form(run_id: str, question: str) -> str:
     """Phase 3: re-enter a checkpointed waiting_approval run after a restart."""
     return f"""<div class="panel" id="resume-panel">
@@ -300,7 +430,8 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
                     waiting: bool, question: str, report: dict | None,
                     error: str | None, agents_html: str, run_active: bool,
                     state: str = "", resume: bool = False,
-                    resume_question: str = "") -> str:
+                    resume_question: str = "",
+                    approval_panel: str = "") -> str:
     sess = (
         f'#{session["id"]} {esc(session["tenant"])} {esc(session["currency"])} '
         f'&gt;{session["approval_threshold"]} ({esc(session["user_role"])})'
@@ -367,8 +498,12 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
       String(detail).replace(/</g, "&lt;");
     traceEl.appendChild(div);
     traceEl.scrollTop = traceEl.scrollHeight;
-    if (ev.event === "approval_requested" ||
-        ev.event === "human_input_requested") {{
+    if (ev.event === "approval_requested") {{
+      setState("waiting_approval");
+      const ap = document.getElementById("approval-panel");
+      if (ap) ap.style.display = "";
+    }}
+    if (ev.event === "human_input_requested") {{
       setState("waiting_approval");
       if (qEl) qEl.textContent = ev.question || JSON.stringify(ev);
       if (panel) panel.style.display = "";
@@ -397,6 +532,7 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
 {err_html}
 {answer_form(run_id, question, waiting)}
 {resume_html}
+{approval_panel}
 <h2>live trace</h2>
 <div class="trace" id="trace"></div>
 <h2>agents</h2>
