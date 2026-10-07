@@ -114,3 +114,14 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_run(run_id: str) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute(
+            "SELECT r.*, s.tenant FROM runs r "
+            "LEFT JOIN sessions s ON s.id = r.session_id "
+            "WHERE r.run_id = ?",
+            (run_id,),
+        ).fetchone()
+    return dict(row) if row else None
