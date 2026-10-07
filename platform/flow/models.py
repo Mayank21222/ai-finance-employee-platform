@@ -94,11 +94,31 @@ class SessionContextBlock(BaseModel):
         )
 
 
+class ConnectorDef(BaseModel):
+    """Phase 3: an external API tool defined entirely in config.
+
+    name/description/method/url (with {{vars.x}}, {{args.x}}, {{session.<key>}}
+    and {{app.base_url}} placeholders), headers, a JSON body template and a
+    permission level - no Python needed to reach a company's real API.
+    """
+
+    name: str = Field(min_length=1)
+    description: str = ""
+    method: str = "GET"
+    url: str = Field(min_length=1)
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str = ""
+    level: str = "read"
+    timeout: float = 15.0
+
+
 class Flow(BaseModel):
     name: str = "flow"
     start_node_id: str
     session_context: SessionContextBlock
     nodes: list[FlowNode] = Field(default_factory=list)
+    connectors: list[ConnectorDef] = Field(default_factory=list)
+    """Phase 3: external API connectors exposed as registry tools."""
     max_visits_per_node: int = 3
     """Platform default: how often one flow node may be entered per run."""
     max_total_visits: int = 40

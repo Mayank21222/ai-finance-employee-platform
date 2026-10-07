@@ -187,7 +187,8 @@ def test_agent_states_from_synthetic_trace():
         assert ap["status"] == "complete"
         assert ap["answer"] == "ap_answer = 42500 INR due 2026-07-30"
         assert "looking up" in ap["reasoning"]
-        assert "click" in ap["all_tools"] and len(ap["tools"]) == 10
+        assert "click" in ap["all_tools"] and len(ap["tools"]) == 11
+        assert "get_invoice_list" in ap["tools"]  # Phase 3: shipped connector
 
         (run_dir / "trace.jsonl").write_text("")
         idle = {s["node_id"]: s

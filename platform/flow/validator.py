@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from collections import deque
 
+from ai_operator.permissions import PermissionLevel
 from ai_operator.tools.registry import names
 from platform.flow.models import (
     AgentNode,
+    ConnectorDef,
     EndNode,
     Flow,
     MessageNode,
@@ -20,6 +22,7 @@ from platform.flow.models import (
 )
 
 SUPPORTED_CHECK_TYPES = ("payables_state",)
+SUPPORTED_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 INITIAL_SESSION_VARIABLE_KEYS: set[str] = set()
 """Variables defined before any node runs; the variables system extends this."""
@@ -53,6 +56,8 @@ def validate(flow: Flow) -> list[str]:
                     f"Node '{node.node_id}' connects to unknown node '{target}'."
                 )
 
+    registered = set(names())
+    connector_names = {conn.name for conn in flow.connectors}
     for node in flow.nodes:
         if isinstance(node, AgentNode):
             if not node.next_node_ids and not node.fallback_next:
@@ -65,7 +70,7 @@ def validate(flow: Flow) -> list[str]:
                     "routing keys need a saved variable to read."
                 )
             for tool_name in node.tools_enabled:
-                if tool_name not in names():
+                if tool_name not in registered and tool_name not in connector_names:
                     errors.append(
                         f"Agent node '{node.node_id}' enables tool '{tool_name}', "
                         "which does not exist in the tool registry."
@@ -91,6 +96,43 @@ def validate(flow: Flow) -> list[str]:
                 )
 
     errors.extend(_template_variable_errors(flow, node_map))
+    errors.extend(_connector_errors(flow))
+    return errors
+
+
+def _connector_errors(flow: Flow) -> list[str]:
+    """Phase 3: connectors must be unique, usable over HTTP, and not collide
+    with built-in registry tools (compilation registers them as tools)."""
+    errors: list[str] = []
+    seen: set[str] = set()
+    # Registry names minus previously-synced connectors are genuinely
+    # built-in; a connector whose name lands there is a collision.
+    from ai_operator.tools import connectors as connector_tools
+
+    registered = set(names())
+    builtin = registered - connector_tools.registered_names()
+    for conn in flow.connectors:
+        if conn.name in seen:
+            errors.append(f"Duplicate connector name '{conn.name}'.")
+        seen.add(conn.name)
+        if conn.name in builtin:
+            errors.append(
+                f"Connector '{conn.name}' collides with a built-in tool; "
+                "pick another name."
+            )
+        method = str(conn.method).upper()
+        if method not in SUPPORTED_HTTP_METHODS:
+            errors.append(
+                f"Connector '{conn.name}' has unsupported HTTP method "
+                f"'{conn.method}' (supported: {', '.join(SUPPORTED_HTTP_METHODS)})."
+            )
+        if conn.level not in PermissionLevel._value2member_map_:
+            errors.append(
+                f"Connector '{conn.name}' has invalid permission level "
+                f"'{conn.level}' (read, reversible_write, irreversible_write)."
+            )
+        if "{{" in conn.url and "}}" not in conn.url:
+            errors.append(f"Connector '{conn.name}' has an unterminated URL template.")
     return errors
 
 

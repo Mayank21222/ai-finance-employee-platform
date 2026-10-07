@@ -11,6 +11,7 @@ from langgraph.types import interrupt
 from ai_operator.permissions import PermissionDecision, approval_prompt, evaluate_permission
 from ai_operator.session import SessionContext, session_from_config
 from ai_operator.state import AgentState, Decision
+from ai_operator.tools import connectors as connector_tools
 from ai_operator.tools.registry import UnknownToolError, get, names, run
 from ai_operator.tracing import trace_event
 
@@ -109,6 +110,14 @@ def run_execute(
 
     attempts = 0
     result = None
+    # Phase 3: connector tools render {{vars.x}}/{{session.*}} templates
+    # against this step's variable snapshot before the HTTP call.
+    connector_tools.set_runtime(
+        state.get("variables") or {},
+        {"tenant": session.tenant, "currency": session.currency,
+         "approval_threshold": session.approval_threshold,
+         "user_role": session.user_role},
+    )
     while attempts <= MAX_RETRIES:
         attempts += 1
         result = run(spec.name, decision.tool_args)

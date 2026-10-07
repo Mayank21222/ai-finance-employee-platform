@@ -8,6 +8,19 @@
     "user_role": "finance_operator",
     "tools_enabled": []
   },
+  "connectors": [
+    {
+      "name": "get_invoice_list",
+      "description": "Fetch the current invoice list from the accounting API (mock app, read-only).",
+      "method": "GET",
+      "url": "{{app.base_url}}/api/invoices?tenant={{session.tenant}}",
+      "headers": {
+        "Accept": "application/json"
+      },
+      "body": "",
+      "level": "read"
+    }
+  ],
   "nodes": [
     {
       "type": "agent",
@@ -39,6 +52,7 @@
         "click",
         "fill",
         "navigate",
+        "get_invoice_list",
         "read_file",
         "read_memory",
         "read_page",
@@ -61,6 +75,7 @@
       ],
       "tools_enabled": [
         "click",
+        "get_invoice_list",
         "navigate",
         "read_file",
         "read_memory",

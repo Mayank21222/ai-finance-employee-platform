@@ -111,3 +111,8 @@ def run(name: str, args: dict[str, Any]) -> ToolResult:
 def clear_registry() -> None:
     """Test hook."""
     _REGISTRY.clear()
+
+
+def unregister(name: str) -> None:
+    """Remove a tool; used by the connector registry to re-sync (Phase 3)."""
+    _REGISTRY.pop(name, None)

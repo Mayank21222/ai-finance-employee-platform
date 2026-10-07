@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from ai_operator.nodes import ask, decide, execute, finish, understand, verify_node
 from ai_operator.state import AgentState
 from ai_operator.tools import browser as browser_tools
+from ai_operator.tools import connectors as connector_tools
 from ai_operator.tracing import trace_event
 from ai_operator.variables import write_variable
 from platform.flow.models import (
@@ -40,6 +41,13 @@ def compile_flow(flow: Flow, client: Any) -> StateGraph:
     errors = validate(flow)
     if errors:
         raise ValueError("cannot compile an invalid flow:\n- " + "\n- ".join(errors))
+    # Phase 3: config-defined external API tools are (re)registered so the
+    # registry always reflects exactly the connectors of this flow.
+    connector_errors = connector_tools.sync(
+        connector_tools.from_defs(flow.connectors))
+    if connector_errors:
+        raise ValueError("cannot register connectors:\n- "
+                         + "\n- ".join(connector_errors))
     first_end = next(n.node_id for n in flow.nodes if isinstance(n, EndNode))
     graph = StateGraph(AgentState)
     for node in flow.nodes:
