@@ -10,9 +10,11 @@ deterministic verifier reading real app state.
 - `company_data/` — vendor invoices, `policies.md`, `procedures.md`, memory
 - `mock_app/` — FastAPI payables app (form + list + read-only API) with failure switches
 - `ai_operator/` — graph, state, nodes, tools, permissions, verifier, tracing, model client
+- `platform/` — low-code layer: flow models/validator/compiler + FastAPI dashboard
+- `configs/` — `finance_employee.json`, the shipped flow config the graph compiles from
 - `prompts/` — six-part runtime prompts (role, task, constraints, output format, examples, fallback)
 - `runs/` — per-run `trace.jsonl`, evidence screenshots, final `report.json`
-- `tests/` — permissions, registry, verifier, and end-to-end tests (all failure modes)
+- `tests/` — permissions, registry, verifier, e2e, platform flow, dashboard tests
 
 ## Install
 
@@ -67,15 +69,45 @@ They map to `POST /debug/failures` / `POST /debug/reset` on the mock app.
 `MODEL_PROVIDER` = `stub` (default, offline, deterministic) | `openai` |
 `anthropic`. See `.env.example`.
 
+## Dashboard (run console + editors)
+
+Terminal 2 — start the dashboard:
+
+```bash
+.venv/bin/python -m uvicorn platform.dashboard.app:app --port 8001
+```
+
+Open <http://127.0.0.1:8001/runs>, pick a session, type a request, start a
+run. The trace streams live over SSE; approval/clarification prompts appear
+inline (answer without leaving the page); agent cards show status, current
+reasoning, the saved answer, and clickable tool toggles.
+
+Pages: **Run console** (runs + history + report), **Sessions**
+(tenant/currency/threshold/role), **Flow editor** (Mermaid diagram, connect
+nodes, inline validator), **Agents** (persona, instructions, save_as,
+fallback, tool toggles), **Message nodes** (templates with a
+`{{vars.x}}` insert dropdown, next/fallback picks), **Documents** (upload to
+`company_data/<tenant>/`, attach per agent).
+
+Notes:
+
+- One run at a time (runs would fight over the payables data); config edits
+  apply from the next run.
+- Use `python -m uvicorn`, not the `uvicorn` console script: the repo's
+  `platform/` package must win over the stdlib module of the same name, which
+  needs the working directory on `sys.path`.
+- Dashboard state lives in `dashboard.db` (sessions + run history).
+
 ## Tests
 
 ```bash
 python -m pytest tests -q
 ```
 
-27 unit tests run in milliseconds; the 3 end-to-end tests start their own
-mock app on port 8011 and drive the full graph (happy path, `renamed_field`,
-`popup,validation`).
+62 tests run in seconds: permissions, registry, verifier, the 3 end-to-end
+failure-mode tests (their own mock app on port 8011), the platform flow
+system (validator, compiler, template rendering, visit limits), and the
+dashboard (sessions, run lifecycle, SSE, agents view, config editors).
 
 ## How completion is decided
 

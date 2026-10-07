@@ -46,3 +46,16 @@
     the ask node, and a LangGraph `interrupt()` pauses for the answer. The
     permission layer's `tool_name == "ask_human"` special case remains as a
     safety net should it ever arrive through the tool path.
+13. **The `platform/` package shadows the stdlib module of the same name**
+    (mandated by the spec). `platform/__init__.py` executes the real stdlib
+    `platform.py` source into our package namespace so `platform.python_*`
+    keeps working; for the same reason uvicorn must be started as
+    `python -m uvicorn platform.dashboard.app:app` (console scripts do not put
+    the cwd on `sys.path`, so the stdlib would win).
+14. **One dashboard run at a time**, answered interrupts ride a queue instead
+    of stdin, and the SSE stream tails `trace.jsonl` (page reloads replay the
+    whole trace rather than maintaining a second event store).
+15. **Dashboard persistence** is a local SQLite file `dashboard.db` (sessions
+    + run history, gitignored) plus the existing `runs/<run_id>/` artifacts;
+    the single shipped flow config `configs/finance_employee.json` is edited
+    in place by every editor page, validated before each write.
