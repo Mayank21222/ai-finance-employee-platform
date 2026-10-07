@@ -19,7 +19,11 @@ from ai_operator.tracing import trace_event
 HISTORY_DETAIL_CHARS = 220
 
 
-def _user_prompt(state: AgentState) -> str:
+def _user_prompt(
+    state: AgentState,
+    agent_instructions: str | None = None,
+    documents: list[str] | None = None,
+) -> str:
     history = state.get("history") or []
     lines = []
     for i, h in enumerate(history):
@@ -30,7 +34,7 @@ def _user_prompt(state: AgentState) -> str:
     history_text = "\n".join(lines) or "(empty)"
     remaining = max(0, _max_steps() - int(state.get("step_count", 0)))
     observation = state.get("last_observation") or "none"
-    return (
+    sections = (
         f"[TASK]\n{state['task']}\n\n"
         f"[UNDERSTANDING]\n{state.get('understanding') or '(not set)'}\n\n"
         f"[PLAN]\n{state.get('plan') or '(not set)'}\n\n"
@@ -39,6 +43,13 @@ def _user_prompt(state: AgentState) -> str:
         f"[LAST OBSERVATION]\n{observation}\n\n"
         f"[REMAINING STEPS]\n{remaining}"
     )
+    # Agent extras go LAST so user-authored text can never shadow the core
+    # sections above (the stub and retries scan by section heading).
+    if agent_instructions:
+        sections += f"\n\n[AGENT INSTRUCTIONS]\n{agent_instructions}"
+    if documents:
+        sections += "\n\n[DOCUMENTS]\n" + "\n\n".join(documents)
+    return sections
 
 
 def _max_steps() -> int:
@@ -47,7 +58,13 @@ def _max_steps() -> int:
     return int(os.environ.get("MAX_STEPS", "25"))
 
 
-def run_decide(state: AgentState, client: ModelClient) -> dict:
+def run_decide(
+    state: AgentState,
+    client: ModelClient,
+    agent_system: str | None = None,
+    agent_instructions: str | None = None,
+    documents: list[str] | None = None,
+) -> dict:
     run_id = state["run_id"]
     step = int(state.get("step_count", 0)) + 1
     if step > _max_steps():
@@ -60,7 +77,11 @@ def run_decide(state: AgentState, client: ModelClient) -> dict:
         }
 
     system = load_prompt("decide")
-    user = _user_prompt(state)
+    if agent_system:
+        # Persona first, decision contract second: the schema rules stay last
+        # and still win the prompt.
+        system = f"{agent_system}\n\n{system}"
+    user = _user_prompt(state, agent_instructions, documents)
     raw = client.complete(system, user)
     decision, failures = _validate(raw, client, system, user)
     if decision is None:

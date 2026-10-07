@@ -1,0 +1,49 @@
+{
+  "name": "finance_employee",
+  "start_node_id": "ap_agent",
+  "session_context": {
+    "tenant": "acme",
+    "currency": "INR",
+    "approval_threshold": 50000.0,
+    "user_role": "finance_operator",
+    "tools_enabled": []
+  },
+  "nodes": [
+    {
+      "type": "agent",
+      "node_id": "ap_agent",
+      "system_prompt": "prompts/agent_ap.md",
+      "instructions": "1. Search company_data for the vendor's invoice files and read every candidate.\n2. Pick the invoice with the latest invoice date and note its amount and due date.\n3. Read company_data/policies.md and compare the amount against the approval threshold.\n4. Open the payables add-invoice page and read it before typing.\n5. Fill vendor, amount and due date using the selectors the page actually exposes.\n6. Submit the form; if it fails, read the page and recover.\n7. Hand off to verification and act on its result.",
+      "documents": [
+        "company_data/procedures.md",
+        "company_data/policies.md"
+      ],
+      "tools_enabled": [
+        "click",
+        "fill",
+        "navigate",
+        "read_file",
+        "read_memory",
+        "read_page",
+        "screenshot",
+        "search_files",
+        "submit_form",
+        "write_memory"
+      ],
+      "next_node_ids": ["check_invoice"],
+      "fallback_next": "report",
+      "save_as": "ap_answer"
+    },
+    {
+      "type": "verify",
+      "node_id": "check_invoice",
+      "check_type": "payables_state",
+      "match_next": "report",
+      "mismatch_next": "ap_agent"
+    },
+    {
+      "type": "end",
+      "node_id": "report"
+    }
+  ]
+}

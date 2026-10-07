@@ -18,7 +18,11 @@ MAX_RETRIES = 2  # initial attempt + 2 retries for transient errors only
 RETRY_DELAY_SECONDS = 0.5
 
 
-def run_execute(state: AgentState, config: RunnableConfig) -> dict:
+def run_execute(
+    state: AgentState,
+    config: RunnableConfig,
+    allowed_tools: tuple[str, ...] = (),
+) -> dict:
     run_id = state["run_id"]
     step = int(state.get("step_count", 0))
     session: SessionContext = session_from_config(config)
@@ -36,6 +40,20 @@ def run_execute(state: AgentState, config: RunnableConfig) -> dict:
         return {
             "last_observation": observation,
             "history": [{"step": step, "kind": "error", "detail": f"unknown tool {tool_name}", "ok": False}],
+        }
+
+    if allowed_tools and spec.name not in allowed_tools:
+        observation = (
+            f"TOOL {spec.name!r} is not enabled for this agent. "
+            f"Enabled tools: {', '.join(allowed_tools)}. "
+            "Do not call it; use an enabled tool or ask a human."
+        )
+        trace_event(run_id, "tool_disabled", step=step, tool_name=spec.name,
+                    scope="agent")
+        return {
+            "last_observation": observation,
+            "history": [{"step": step, "kind": "error",
+                         "detail": f"agent disabled tool {spec.name}", "ok": False}],
         }
 
     if session.tools_enabled and spec.name not in session.tools_enabled:
