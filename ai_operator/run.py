@@ -17,9 +17,8 @@ from dotenv import load_dotenv
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
-from ai_operator.graph import build_graph
+from ai_operator.graph import build_graph, flow_session
 from ai_operator.llm import get_client
-from ai_operator.session import SessionContext
 from ai_operator.state import INITIAL_STATE_KEYS
 from ai_operator.tracing import TraceLogger, unregister
 
@@ -186,7 +185,7 @@ def run(argv: list[str] | None = None) -> int:
     client = get_client()
     with SqliteSaver.from_conn_string(str(CHECKPOINT_DB)) as saver:
         graph = build_graph(client, checkpointer=saver)
-        session = SessionContext()
+        session = flow_session()
         config = {
             "configurable": {"thread_id": run_id, "session_context": session},
             "recursion_limit": 400,
