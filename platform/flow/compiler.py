@@ -278,12 +278,31 @@ def _resolve_system_prompt(text: str) -> str | None:
 
 
 def _load_documents(paths: list[str]) -> list[str]:
-    """Load attached documents as prompt sections; missing files say so."""
+    """Load attached documents as prompt sections; missing files say so.
+
+    Phase 3: a .pdf attachment reads its extracted .txt sibling when one
+    exists (written at upload time); raw PDF bytes are never sent to the model.
+    """
     loaded: list[str] = []
     for raw in paths:
         path = Path(raw)
         if not path.is_file():
             path = REPO_ROOT / raw
+        if path.suffix.lower() == ".pdf":
+            txt = path.with_suffix(".txt")
+            if not txt.is_file():
+                txt = (REPO_ROOT / raw).with_suffix(".txt")
+            if txt.is_file():
+                try:
+                    body = txt.read_text(encoding="utf-8")[:DOCUMENT_CHAR_LIMIT]
+                except (OSError, ValueError):
+                    body = "(unreadable extracted text: not utf-8)"
+                if not body.strip():
+                    body = "(pdf upload: text extraction failed or empty)"
+                loaded.append(f"{raw} (extracted text):\n{body}")
+                continue
+            loaded.append(f"{raw}:\n(pdf document, no extracted text found)")
+            continue
         try:
             body = path.read_text(encoding="utf-8")[:DOCUMENT_CHAR_LIMIT] \
                 if path.is_file() else "(missing document)"

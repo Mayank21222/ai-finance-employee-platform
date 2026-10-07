@@ -583,6 +583,24 @@ async def documents_upload(tenant: str = Form(...),
             "/documents?error=" + quote("File larger than 2MB."),
             status_code=303)
     (target / name).write_bytes(body)
+    if Path(name).suffix.lower() == ".pdf":
+        # Phase 3: extract text at upload time into a .txt sibling so the
+        # agent can actually read the document (KNOWN_LIMITATIONS item 12).
+        from urllib.parse import quote
+
+        from platform.dashboard.pdftext import extract_pdf_text
+
+        txt_path = (target / name).with_suffix(".txt")
+        try:
+            txt_path.write_text(extract_pdf_text(body), encoding="utf-8")
+        except Exception as exc:
+            txt_path.write_text("", encoding="utf-8")
+            warning = (f"PDF text extraction failed for {name}: "
+                       f"{type(exc).__name__}: {exc} (stored empty .txt)")
+            print(f"[documents] WARNING {warning}")
+            return RedirectResponse(
+                "/documents?error=" + quote(warning),
+                status_code=303)
     return RedirectResponse(f"/documents?tenant={tenant}", status_code=303)
 
 
