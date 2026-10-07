@@ -32,6 +32,9 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    flipped = runner.reconcile()
+    if flipped:
+        print(f"[dashboard] interrupted (orphaned) runs: {flipped}")
 
 
 @app.on_event("shutdown")
@@ -147,11 +150,27 @@ def run_detail(run_id: str):
         if handle.interrupt:
             question = str(handle.interrupt.get("question", handle.interrupt))
         error = handle.error
+        state = {"running": "running", "waiting_input": "waiting_approval",
+                 "cancelled": "interrupted", "failed": "failed"}.get(
+                     handle.status) or str(row.get("state") or "")
+        if handle.status == "done":
+            state = str(row.get("state") or "completed")
     else:
         status = str(row.get("status") or "unknown")
         waiting = False
         question = ""
         error = row.get("error")
+        state = str(row.get("state") or "")
+    # An orphaned waiting_approval run (dashboard restarted mid-approval)
+    # shows the resume form instead of the live answer form.
+    orphaned_waiting = (state == "waiting_approval"
+                        and (handle is None or handle.terminal))
+    resume_question = ""
+    if orphaned_waiting:
+        for ev in reversed(_trace_events(run_id)):
+            if ev.get("event") in ("approval_requested", "human_input_requested"):
+                resume_question = str(ev.get("question", ""))
+                break
     session = db.get_session(int(row["session_id"])) if row.get("session_id") else None
     run_active = handle is not None and not handle.terminal
     flow = load_flow(DEFAULT_FLOW_PATH)
@@ -161,7 +180,8 @@ def run_detail(run_id: str):
         run_id=run_id, task=str(row.get("task") or ""), status=status,
         session=session, waiting=waiting, question=question,
         report=_report(run_id), error=error, agents_html=agents_html,
-        run_active=run_active,
+        run_active=run_active, state=state, resume=orphaned_waiting,
+        resume_question=resume_question,
     )
 
 
@@ -221,6 +241,44 @@ def answer_run(run_id: str, answer: str = Form(...)):
 def cancel_run(run_id: str) -> Response:
     runner.cancel_run(run_id)
     return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+@app.post("/runs/{run_id}/resume", include_in_schema=False)
+def resume_run(run_id: str, answer: str = Form(...)):
+    try:
+        runner.resume_run(run_id, answer.strip())
+    except RuntimeError as exc:
+        return HTMLResponse(
+            html.page("Run",
+                      f'<h1 class="err">{html.esc(exc)}</h1>'
+                      f'<p><a href="/runs/{html.esc(run_id)}">Back to run</a></p>',
+                      active="runs"),
+            status_code=409,
+        )
+    return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+
+@app.get("/history", response_class=HTMLResponse, include_in_schema=False)
+def history_page() -> str:
+    return html.history_page(db.list_runs(limit=200))
+
+
+@app.get("/runs/{run_id}/trace", include_in_schema=False)
+def run_trace(run_id: str):
+    path = RUNS_ROOT / run_id / "trace.jsonl"
+    if not path.is_file():
+        return Response("no trace for this run\n", media_type="text/plain",
+                        status_code=404)
+    return Response(path.read_text(errors="replace"),
+                    media_type="text/plain; charset=utf-8")
+
+
+@app.get("/runs/{run_id}/evidence", include_in_schema=False)
+def evidence_index(run_id: str):
+    ev_dir = RUNS_ROOT / run_id / "evidence"
+    names = sorted(p.name for p in ev_dir.glob("*") if p.is_file()) \
+        if ev_dir.is_dir() else []
+    return HTMLResponse(html.evidence_index_page(run_id, names))
 
 
 @app.get("/runs/{run_id}/agents", include_in_schema=False,

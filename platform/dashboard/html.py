@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from html import escape
 from pathlib import Path
 
 NAV = [
     ("runs", "/runs", "Run console"),
+    ("history", "/history", "History"),
     ("sessions", "/sessions", "Sessions"),
     ("agents", "/agents", "Agents"),
     ("flow", "/flow", "Flow editor"),
@@ -57,10 +59,12 @@ _CSS = """
            border-radius:6px; padding:14px; margin:12px 0; }
   .badge { display:inline-block; padding:1px 8px; border-radius:10px;
            font-size:11.5px; border:1px solid var(--line); color:var(--dim); }
-  .badge.running { color:var(--warn); border-color:var(--warn); }
-  .badge.complete, .badge.verified_complete, .badge.done { color:var(--ok);
-       border-color:var(--ok); }
+  .badge.running, .badge.queued, .badge.waiting_approval { color:var(--warn);
+       border-color:var(--warn); }
+  .badge.complete, .badge.verified_complete, .badge.done,
+  .badge.completed { color:var(--ok); border-color:var(--ok); }
   .badge.failed, .badge.needs_human { color:var(--err); border-color:var(--err); }
+  .badge.interrupted { color:var(--err); border-color:var(--err); }
   .trace { background:#0a0e13; border:1px solid var(--line); border-radius:6px;
            padding:10px; height:340px; overflow-y:auto; font-size:12.5px;
            font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -144,10 +148,12 @@ def runs_page(runs: list[dict], sessions: list[dict]) -> str:
         f'<tr><td class="mono"><a href="/runs/{esc(r["run_id"])}" '
         f'style="color:var(--acc)">{esc(r["run_id"])}</a></td>'
         f'<td>{esc(r["task"] or "")}</td><td>{esc(r["tenant"] or "-")}</td>'
+        f'<td><span class="badge {esc(r.get("state") or "-")}">'
+        f'{esc(r.get("state") or "-")}</span></td>'
         f'<td><span class="badge {esc(r["status"])}">{esc(r["status"])}</span></td>'
         f'<td class="dim">{r["created_at"]:.0f}</td></tr>'
         for r in runs
-    ) or '<tr><td colspan="5" class="dim">No runs yet.</td></tr>'
+    ) or '<tr><td colspan="6" class="dim">No runs yet.</td></tr>'
     options = "".join(
         f'<option value="{s["id"]}">#{s["id"]} {esc(s["tenant"])} '
         f'{esc(s["currency"])} &gt;{s["approval_threshold"]}</option>'
@@ -171,11 +177,65 @@ def runs_page(runs: list[dict], sessions: list[dict]) -> str:
 </div>
 <div id="active-run"></div>
 <h2>Run history</h2>
+<p class="dim">Full history with state, trace and evidence links lives on the
+<a href="/history">History</a> page.</p>
 <table>
-<tr><th>Run</th><th>Task</th><th>Session</th><th>Status</th><th>Started</th></tr>
+<tr><th>Run</th><th>Task</th><th>Session</th><th>State</th><th>Status</th>
+<th>Started</th></tr>
 {rows}
 </table>""",
         active="runs",
+    )
+
+
+def history_page(runs: list[dict]) -> str:
+    """Phase-3 runs history: state, task, session, when, trace/evidence links."""
+    rows = ""
+    for r in runs:
+        state = str(r.get("state") or "-")
+        started = time.strftime("%Y-%m-%d %H:%M:%S",
+                                time.localtime(r["created_at"]))
+        finished = (time.strftime("%Y-%m-%d %H:%M:%S",
+                                  time.localtime(r["finished_at"]))
+                    if r.get("finished_at") else "-")
+        rows += (
+            f'<tr><td class="mono"><a href="/runs/{esc(r["run_id"])}" '
+            f'style="color:var(--acc)">{esc(r["run_id"])}</a></td>'
+            f'<td><span class="badge {esc(state)}">{esc(state)}</span></td>'
+            f'<td>{esc(r["task"] or "")}</td>'
+            f'<td>{esc(r["tenant"] or "-")} (#{r["session_id"] or "-"})</td>'
+            f'<td class="dim">{esc(started)}</td>'
+            f'<td class="dim">{esc(finished)}</td>'
+            f'<td><a href="/runs/{esc(r["run_id"])}/trace">trace</a> · '
+            f'<a href="/runs/{esc(r["run_id"])}/evidence">evidence</a></td></tr>'
+        )
+    if not rows:
+        rows = '<tr><td colspan="7" class="dim">No runs yet.</td></tr>'
+    return page(
+        "History",
+        """
+<h1>Runs history</h1>
+<p class="dim">State: queued, running, waiting_approval (interrupted at an
+approval, resumable), completed, failed, interrupted (cut short by a restart
+or cancel).</p>
+<table>
+<tr><th>Run</th><th>State</th><th>Task</th><th>Session</th><th>Started</th>
+<th>Finished</th><th>Artifacts</th></tr>
+""" + rows + "</table>",
+        active="history",
+    )
+
+
+def evidence_index_page(run_id: str, names: list[str]) -> str:
+    items = "".join(
+        f'<li><a class="mono" href="/runs/{esc(run_id)}/evidence/'
+        f'{esc(n)}">{esc(n)}</a></li>' for n in names
+    ) or '<li class="dim">No evidence files.</li>'
+    return page(
+        f"Evidence {run_id}",
+        f'<h1>Evidence · <span class="mono">{esc(run_id)}</span></h1>'
+        f'<ul>{items}</ul>',
+        active="history",
     )
 
 
@@ -220,9 +280,27 @@ def answer_form(run_id: str, question: str, show: bool) -> str:
 </div>"""
 
 
+def resume_form(run_id: str, question: str) -> str:
+    """Phase 3: re-enter a checkpointed waiting_approval run after a restart."""
+    return f"""<div class="panel" id="resume-panel">
+  <h2>run interrupted by a dashboard restart</h2>
+  <p class="dim">This run stopped at an approval and its checkpoint is saved.
+  Submit the approval answer to resume from exactly where it left off.</p>
+  <form method="post" action="/runs/{esc(run_id)}/resume" class="row">
+    <strong>{esc(question or "Approve?")}</strong>
+    <input name="answer" style="flex:1;min-width:280px"
+           placeholder="type your answer (y / n / a sentence)" required
+           autofocus>
+    <button class="primary">Resume run</button>
+  </form>
+</div>"""
+
+
 def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
                     waiting: bool, question: str, report: dict | None,
-                    error: str | None, agents_html: str, run_active: bool) -> str:
+                    error: str | None, agents_html: str, run_active: bool,
+                    state: str = "", resume: bool = False,
+                    resume_question: str = "") -> str:
     sess = (
         f'#{session["id"]} {esc(session["tenant"])} {esc(session["currency"])} '
         f'&gt;{session["approval_threshold"]} ({esc(session["user_role"])})'
@@ -265,6 +343,10 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
   const traceEl = document.getElementById("trace");
   const panel = document.getElementById("answer-panel");
   const qEl = document.getElementById("answer-question");
+  const stateEl = document.getElementById("state-badge");
+  const setState = function(s) {{
+    if (stateEl) {{ stateEl.className = "badge " + s; stateEl.textContent = s; }}
+  }};
   const es = new EventSource("/runs/{esc(run_id)}/events");
   es.onmessage = function(m) {{
     let ev; try {{ ev = JSON.parse(m.data); }} catch (e) {{ return; }}
@@ -287,18 +369,24 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
     traceEl.scrollTop = traceEl.scrollHeight;
     if (ev.event === "approval_requested" ||
         ev.event === "human_input_requested") {{
+      setState("waiting_approval");
       if (qEl) qEl.textContent = ev.question || JSON.stringify(ev);
       if (panel) panel.style.display = "";
     }}
     if (ev.event === "human_input") {{
+      setState("running");
       if (panel) panel.style.display = "none";
     }}
   }};
 }})();
 </script>"""
+    state_badge = (f'<span class="badge {esc(state)}" id="state-badge">'
+                   f"{esc(state)}</span>") if state else ""
+    resume_html = resume_form(run_id, resume_question) if resume else ""
     body = f"""<div class="row" style="justify-content:space-between">
   <h1>Run <span class="mono">{esc(run_id)}</span></h1>
   <div class="row">
+    {state_badge}
     <span class="badge {esc(status)}">{esc(status)}</span>
     {cancel}
     <a href="/runs"><button>Back</button></a>
@@ -308,6 +396,7 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
 <p class="dim">session: {sess}</p>
 {err_html}
 {answer_form(run_id, question, waiting)}
+{resume_html}
 <h2>live trace</h2>
 <div class="trace" id="trace"></div>
 <h2>agents</h2>

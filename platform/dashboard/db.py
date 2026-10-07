@@ -48,6 +48,13 @@ def init_db() -> None:
             );
             """
         )
+        # Phase-3 state machine column (queued|running|waiting_approval|
+        # completed|failed|interrupted); migrate pre-existing tables.
+        try:
+            con.execute("ALTER TABLE runs ADD COLUMN state TEXT "
+                        "NOT NULL DEFAULT 'interrupted'")
+        except sqlite3.OperationalError:
+            pass
         row = con.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()
         if row["n"] == 0:
             con.execute(
@@ -91,18 +98,36 @@ def record_run(run_id: str, session_id: int, task: str) -> None:
     with connect() as con:
         con.execute(
             "INSERT OR REPLACE INTO runs (run_id, session_id, task, status, "
-            "error, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (run_id, session_id, task, "running", None, time.time(), None),
+            "error, created_at, finished_at, state) VALUES (?, ?, ?, ?, ?, ?, "
+            "?, ?)",
+            (run_id, session_id, task, "running", None, time.time(), None,
+             "queued"),
         )
 
 
-def finish_run(run_id: str, status: str, error: str | None = None) -> None:
+def set_state(run_id: str, state: str) -> None:
+    with connect() as con:
+        con.execute("UPDATE runs SET state = ? WHERE run_id = ?",
+                    (state, run_id))
+
+
+def finish_run(run_id: str, status: str, error: str | None = None,
+               state: str = "completed") -> None:
     with connect() as con:
         con.execute(
-            "UPDATE runs SET status = ?, error = ?, finished_at = ? "
+            "UPDATE runs SET status = ?, error = ?, state = ?, finished_at = ? "
             "WHERE run_id = ?",
-            (status, error, time.time(), run_id),
+            (status, error, state, time.time(), run_id),
         )
+
+
+def orphaned_states() -> list[dict[str, Any]]:
+    """Runs stuck in queued/running whose live handle is gone (crashed)."""
+    with connect() as con:
+        rows = con.execute(
+            "SELECT * FROM runs WHERE state IN ('queued', 'running')"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def list_runs(limit: int = 50) -> list[dict[str, Any]]:
