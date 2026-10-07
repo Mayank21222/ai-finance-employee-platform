@@ -9,6 +9,7 @@ for later calls.
 from __future__ import annotations
 
 import queue
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,10 @@ class _BrowserWorker:
         self._lock = threading.Lock()
         self.evidence_dir: Path = Path("runs")
         self.timeout_ms = DEFAULT_TIMEOUT_MS
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     def start(self) -> None:
         with self._lock:
@@ -236,5 +241,16 @@ def set_evidence_dir(path: Path) -> None:
     WORKER.evidence_dir = path
 
 
-def shutdown() -> None:
-    WORKER.stop()
+def capture_evidence(tag: str, timeout: float = 10.0) -> str | None:
+    """Screenshot the current page for the run record; None if no browser is live."""
+    if not WORKER.is_running:
+        return None
+    output = WORKER.call(
+        "screenshot", {"tag": tag, "evidence_dir": str(WORKER.evidence_dir)}, timeout
+    )
+    m = re.search(r"saved screenshot (\S+)", str(output))
+    return m.group(1) if m else None
+
+
+def shutdown() -> Any:
+    return WORKER.stop()

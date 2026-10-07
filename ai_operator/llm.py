@@ -83,34 +83,47 @@ class StubClient:
     """
 
     def complete(self, system: str, user: str) -> str:
-        prompt = f"{system}\n{user}"
-        decision = self._decide(prompt)
+        if '"understanding":' in system:
+            return json.dumps({
+                "understanding": (
+                    "Enter the newest Acme Corp invoice into the payables system and "
+                    "confirm the record exists; policy may require approval."
+                ),
+                "plan": (
+                    "1. Find Acme invoice files\n"
+                    "2. Read them and pick the latest invoice date\n"
+                    "3. Read policies.md and check the approval threshold\n"
+                    "4. Open the add-invoice page and fill vendor, amount, due date\n"
+                    "5. Submit the form\n"
+                    "6. Run verification against the read-only API\n"
+                    "7. Report summary with evidence"
+                ),
+            })
+        decision = self._decide(f"{system}\n{user}")
         return json.dumps(decision)
 
     def _decide(self, prompt: str) -> dict:
         history = self._section(prompt, "HISTORY")
         observation = self._section(prompt, "LAST OBSERVATION")
         task = self._section(prompt, "TASK")
+        # Result-aware parsing: only count completed ACTIONS, never output text.
         called = re.findall(r"^\s*\d+\.\s+(\w+)\(", history, flags=re.M)
-        args_seen = history
+        read_paths = re.findall(r"read_file\(path=['\"]?([\w./-]+)", history)
+        filled = re.findall(r"fill\(selector=['\"]?([\w#-]+)['\"]?[^)]*\)\s*->\s*ok", history)
 
         if not called:
             return self._tool("search_files", {"query": "Acme Corp", "path": "company_data"},
                               "Start by finding the vendor's invoice files.")
-        acme_files = re.findall(r"company_data/invoices/acme_[\d-]+\.txt", history)
-        if len(set(acme_files)) < 3:
-            nxt = next(
-                (f for f in [
-                    "company_data/invoices/acme_2026-05-10.txt",
-                    "company_data/invoices/acme_2026-06-15.txt",
-                    "company_data/invoices/acme_2026-07-20.txt",
-                ] if f not in acme_files),
-                None,
-            )
-            if nxt:
-                return self._tool("read_file", {"path": nxt},
-                                  "Read every Acme invoice to compare invoice dates.")
-        if "company_data/policies.md" not in history:
+        acme_all = [
+            "company_data/invoices/acme_2026-05-10.txt",
+            "company_data/invoices/acme_2026-06-15.txt",
+            "company_data/invoices/acme_2026-07-20.txt",
+        ]
+        nxt = next((f for f in acme_all if f not in read_paths), None)
+        if nxt:
+            return self._tool("read_file", {"path": nxt},
+                              "Read every Acme invoice to compare invoice dates.")
+        if "company_data/policies.md" not in read_paths:
             return self._tool("read_file", {"path": "company_data/policies.md"},
                               "Check the approval policy before entering anything.")
         if "navigate" not in called:
@@ -118,13 +131,12 @@ class StubClient:
                               "Open the add-invoice page.")
         if "read_page" not in called:
             return self._tool("read_page", {}, "Inspect the page's actual inputs.")
-        if "vendor" not in args_seen:
+        if "#vendor" not in filled:
             return self._tool("fill", {"selector": "#vendor", "value": "Acme Corp"},
                               "Fill the vendor field.")
-        if "42500" not in args_seen:
+        if "#amount" not in filled:
             return self._tool("fill", {"selector": "#amount", "value": "42500.00"},
                               "Fill the amount from the latest invoice.")
-        filled = re.findall(r"fill\(selector=([\w#-]+)[^)]*\)\s*->\s*ok", history)
         if "#due_date" not in filled and "#due-date-field" not in filled:
             if "due-date-field" in observation:
                 sel = "#due-date-field"
