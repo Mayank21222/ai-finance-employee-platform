@@ -42,13 +42,19 @@ def evaluate_permission(
     level: PermissionLevel,
     tool_args: dict[str, Any],
     policy_threshold: float = APPROVAL_THRESHOLD,
+    require_levels: tuple[str, ...] = (PermissionLevel.irreversible_write.value,),
+    amount_check: bool = True,
 ) -> PermissionDecision:
-    """Route one proposed tool call: allow, require approval, or deny."""
+    """Route one proposed tool call: allow, require approval, or deny.
+
+    Threshold and triggering levels come from the session context (callers
+    pass them in); the defaults reproduce the original policy.
+    """
     if tool_name == "ask_human":
         return PermissionDecision(outcome="allow", reason="clarification is always allowed")
 
     amount = _amount_in_args(tool_args)
-    if amount is not None and amount > policy_threshold:
+    if amount_check and amount is not None and amount > policy_threshold:
         return PermissionDecision(
             outcome="needs_approval",
             reason=(
@@ -57,11 +63,12 @@ def evaluate_permission(
             ),
         )
 
-    if level == PermissionLevel.irreversible_write:
-        return PermissionDecision(
-            outcome="needs_approval",
-            reason=f"tool '{tool_name}' performs an irreversible write",
-        )
+    if level.value in require_levels:
+        if level == PermissionLevel.irreversible_write:
+            reason = f"tool '{tool_name}' performs an irreversible write"
+        else:
+            reason = f"tool '{tool_name}' requires approval at level {level.value}"
+        return PermissionDecision(outcome="needs_approval", reason=reason)
 
     if level == PermissionLevel.reversible_write:
         return PermissionDecision(outcome="allow", reason="reversible write")
