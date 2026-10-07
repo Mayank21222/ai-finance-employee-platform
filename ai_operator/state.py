@@ -47,6 +47,8 @@ class AgentState(TypedDict, total=False):
     report: dict[str, Any] | None
     human_message: str | None
     model_parse_failures: int
+    variables: dict[str, Any]
+    """Mutable session variables (the writable half of run memory)."""
 
 
 INITIAL_STATE_KEYS: dict[str, Any] = {
@@ -64,4 +66,5 @@ INITIAL_STATE_KEYS: dict[str, Any] = {
     "report": None,
     "human_message": None,
     "model_parse_failures": 0,
+    "variables": {},
 }

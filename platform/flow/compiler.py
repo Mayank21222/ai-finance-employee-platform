@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from ai_operator.nodes import ask, decide, execute, finish, understand, verify_node
 from ai_operator.state import AgentState
 from ai_operator.tracing import trace_event
+from ai_operator.variables import write_variable
 from platform.flow.models import (
     TEMPLATE_VAR_RE,
     AgentNode,
@@ -68,12 +69,18 @@ def _add_agent(graph: StateGraph, node: AgentNode, client: Any, first_end: str) 
         return updates
 
     def decide_node(state: AgentState) -> dict:
-        return decide.run_decide(
+        updates = decide.run_decide(
             state, client,
             agent_system=persona,
             agent_instructions=instructions,
             documents=documents,
         )
+        if node.save_as and state.get("status") == "running":
+            decision = updates.get("last_decision") or {}
+            if decision.get("action_type") in ("verify", "finish"):
+                answer = decision.get("expected_outcome") or decision.get("thought") or ""
+                updates.update(write_variable(state, nid, node.save_as, answer))
+        return updates
 
     def execute_node(state: AgentState, config: RunnableConfig) -> dict:
         return execute.run_execute(state, config, allowed_tools=allowed_tools)
