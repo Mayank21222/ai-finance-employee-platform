@@ -1,9 +1,14 @@
-"""Browser tools driven by a persistent Playwright worker thread.
+"""Browser tools driven by a small pool of persistent Playwright worker threads.
 
-Playwright's sync API is bound to the thread that started it, so one dedicated
-worker owns the browser; every tool call is a queue request waited on with a
-timeout. On timeout the caller gets a TimeoutError while the worker stays alive
-for later calls.
+Playwright's sync API is bound to the thread that started it, so each worker
+owns its browser on its own thread; every tool call is a queue request waited
+on with a timeout. On timeout the caller gets a TimeoutError while the worker
+stays alive for later calls.
+
+Routing is sticky per calling thread: a run's ops all land on the same worker
+so page state stays coherent, while other threads use the second browser
+instead of queueing behind a busy one. The pool exposes the same call
+interface as a single worker, so no tool code changed.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from ai_operator.tools.registry import tool
 
 DEFAULT_TIMEOUT_MS = 8000
 PAGE_TEXT_LIMIT = 6000
+POOL_SIZE = 2
 
 
 class NavigateArgs(BaseModel):
@@ -49,10 +55,14 @@ class ScreenshotArgs(BaseModel):
 
 
 class _BrowserWorker:
-    def __init__(self) -> None:
+    """One thread owning one Playwright browser; jobs arrive on its queue."""
+
+    def __init__(self, index: int) -> None:
+        self.index = index
         self._q: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._processing = False
         self.evidence_dir: Path = Path("runs")
         self.timeout_ms = DEFAULT_TIMEOUT_MS
 
@@ -60,11 +70,17 @@ class _BrowserWorker:
     def is_running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
 
+    @property
+    def idle(self) -> bool:
+        return self._q.empty() and not self._processing
+
     def start(self) -> None:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-            self._thread = threading.Thread(target=self._loop, name="browser-worker", daemon=True)
+            self._thread = threading.Thread(
+                target=self._loop, name=f"browser-worker-{self.index}", daemon=True
+            )
             self._thread.start()
 
     def call(self, op: str, args: dict[str, Any], timeout: float) -> Any:
@@ -97,11 +113,13 @@ class _BrowserWorker:
                     result["value"] = "browser closed"
                     done.set()
                     return
+                self._processing = True
                 try:
                     result["value"] = self._dispatch(page, op, args)
                 except Exception as exc:  # noqa: BLE001 - marshalled to caller
                     result["error"] = exc
                 finally:
+                    self._processing = False
                     done.set()
 
     @staticmethod
@@ -201,7 +219,71 @@ def _page_snapshot(page: Any) -> str:
     return "\n".join(lines)
 
 
-WORKER = _BrowserWorker()
+class _BrowserPool:
+    """Sticky pool of browser workers with the single-worker call interface.
+
+    Each calling thread is pinned to one worker, so a run's op sequence acts
+    on one coherent page. Threads that have not spoken yet prefer an idle
+    worker, so a second concurrent run gets the other browser instead of
+    waiting behind a busy one.
+    """
+
+    def __init__(self, size: int = POOL_SIZE) -> None:
+        self._workers = [_BrowserWorker(i) for i in range(size)]
+        self._sticky: dict[int, int] = {}
+        self._rr = 0
+        self._lock = threading.Lock()
+        self.evidence_dir: Path = Path("runs")
+        self.timeout_ms = DEFAULT_TIMEOUT_MS
+
+    @property
+    def is_running(self) -> bool:
+        return any(w.is_running for w in self._workers)
+
+    def start(self) -> None:
+        for w in self._workers:
+            w.start()
+
+    def _route(self) -> int:
+        tid = threading.get_ident()
+        idx = self._sticky.get(tid)
+        if idx is not None:
+            return idx
+        with self._lock:
+            # drop claims from threads that have exited (ids may be reused,
+            # which is harmless: the new owner navigates first anyway)
+            live = {t.ident for t in threading.enumerate()}
+            self._sticky = {t: i for t, i in self._sticky.items() if t in live}
+            idx = self._sticky.get(tid)
+            if idx is not None:
+                return idx
+            claimed = set(self._sticky.values())
+            free = [w.index for w in self._workers if w.index not in claimed]
+            if free:
+                idle_free = [i for i in free if self._workers[i].idle]
+                idx = idle_free[0] if idle_free else free[0]
+            else:
+                # more live threads than workers: they must share a page
+                idx = self._rr % len(self._workers)
+                self._rr += 1
+            self._sticky[tid] = idx
+        return idx
+
+    def call(self, op: str, args: dict[str, Any], timeout: float) -> Any:
+        worker = self._workers[self._route()]
+        worker.timeout_ms = self.timeout_ms
+        worker.evidence_dir = self.evidence_dir
+        return worker.call(op, args, timeout)
+
+    def stop(self) -> Any:
+        last: Any = "browser not running"
+        for w in self._workers:
+            if w.is_running:
+                last = w.stop()
+        return last
+
+
+WORKER = _BrowserPool()
 
 
 @tool("navigate", "Open a URL in the browser.", PermissionLevel.reversible_write, NavigateArgs)
