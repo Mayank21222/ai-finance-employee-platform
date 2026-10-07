@@ -63,7 +63,7 @@ class AnthropicClient:
     def complete(self, system: str, user: str) -> str:
         payload = {
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         }
@@ -201,20 +201,43 @@ class StubClient:
         return m.group(1).strip() if m else ""
 
 
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+
 def get_client() -> ModelClient:
-    provider = os.environ.get("MODEL_PROVIDER", "stub").strip().lower()
-    model = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+    """Pick the model client from the environment.
+
+    LLM_PROVIDER / LLM_MODEL / LLM_API_KEY are the Phase-3 names and win over
+    the older MODEL_PROVIDER / MODEL_NAME / *_API_KEY. STUB_MODEL=1 forces the
+    deterministic stub no matter what (tests set this to stay offline).
+    """
+    if os.environ.get("STUB_MODEL", "").strip() in ("1", "true", "yes"):
+        return StubClient()
+    provider = (
+        os.environ.get("LLM_PROVIDER") or os.environ.get("MODEL_PROVIDER") or "stub"
+    ).strip().lower()
     if provider == "stub":
         return StubClient()
+    model = (
+        os.environ.get("LLM_MODEL") or os.environ.get("MODEL_NAME") or ""
+    ).strip()
     if provider == "openai":
-        key = os.environ.get("OPENAI_API_KEY", "")
+        key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
         if not key:
-            raise RuntimeError("MODEL_PROVIDER=openai requires OPENAI_API_KEY in .env")
+            raise RuntimeError(
+                "LLM_PROVIDER=openai requires LLM_API_KEY (or OPENAI_API_KEY) "
+                "in .env"
+            )
         base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        return OpenAICompatibleClient(model, key, base, DEFAULT_TIMEOUT)
+        return OpenAICompatibleClient(
+            model or "gpt-4o-mini", key, base, DEFAULT_TIMEOUT
+        )
     if provider == "anthropic":
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
+        key = os.environ.get("LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
-            raise RuntimeError("MODEL_PROVIDER=anthropic requires ANTHROPIC_API_KEY in .env")
-        return AnthropicClient(model, key, DEFAULT_TIMEOUT)
-    raise RuntimeError(f"unknown MODEL_PROVIDER: {provider!r}")
+            raise RuntimeError(
+                "LLM_PROVIDER=anthropic requires LLM_API_KEY (or "
+                "ANTHROPIC_API_KEY) in .env"
+            )
+        return AnthropicClient(model or ANTHROPIC_DEFAULT_MODEL, key, DEFAULT_TIMEOUT)
+    raise RuntimeError(f"unknown LLM_PROVIDER: {provider!r}")
