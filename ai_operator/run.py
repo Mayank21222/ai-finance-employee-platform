@@ -47,15 +47,82 @@ def _print_event(event: dict[str, Any]) -> None:
         print(f"  [{kind}]")
 
 
-def _ensure_app(url: str, start_app: bool) -> subprocess.Popen | None:
+def _expected_build_hash() -> str:
+    import hashlib
+
+    return hashlib.sha256((REPO_ROOT / "mock_app" / "app.py").read_bytes()).hexdigest()[:16]
+
+
+def _server_build_hash(url: str) -> str | None:
+    """build_hash served at /health, or None if unreachable / pre-fix server."""
+    try:
+        resp = httpx.get(f"{url}/health", timeout=2.0)
+        data = resp.json()
+        return str(data["build_hash"]) if resp.status_code == 200 else None
+    except Exception:  # noqa: BLE001 - connection errors, 404, non-JSON body
+        return None
+
+
+def _reachable(url: str) -> bool:
     try:
         httpx.get(url, timeout=2.0)
-        return None
+        return True
     except httpx.HTTPError:
-        pass
-    if not start_app:
+        return False
+
+
+def _kill_listener(url: str) -> bool:
+    """Terminate whatever process is listening on the app URL's port."""
+    import signal
+
+    port = url.rsplit(":", 1)[-1]
+    try:
+        out = subprocess.run(
+            ["lsof", "-sTCP:LISTEN", "-ti", f"tcp:{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pids = [int(p) for p in out.stdout.split() if p.isdigit()]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return False
+    return bool(pids)
+
+
+def _ensure_app(url: str, start_app: bool) -> subprocess.Popen | None:
+    expected = _expected_build_hash()
+    current = _server_build_hash(url)
+    if current == expected:
+        return None  # serving the current source: safe to reuse
+
+    if _reachable(url):
+        if current is None:
+            reason = "no /health endpoint (pre-fix server)"
+        else:
+            reason = f"stale build {current}, expected {expected}"
+        if not start_app:
+            raise SystemExit(
+                f"mock app at {url} is stale ({reason}); kill it manually and "
+                "restart, or drop --no-start-app"
+            )
+        print(f"mock app at {url} is stale ({reason}); killing it")
+        if not _kill_listener(url):
+            raise SystemExit(f"could not kill the stale mock app on {url}; "
+                             "kill it manually and retry")
+        for _ in range(20):
+            if not _reachable(url):
+                break
+            time.sleep(0.25)
+        else:
+            raise SystemExit(f"stale mock app on {url} did not stop; "
+                             "kill it manually and retry")
+    elif not start_app:
         raise SystemExit(f"mock app is not reachable at {url}; start it first "
                          "or drop --no-start-app")
+
     port = url.rsplit(":", 1)[-1]
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "mock_app.app:app", "--port", str(port),
@@ -63,12 +130,10 @@ def _ensure_app(url: str, start_app: bool) -> subprocess.Popen | None:
         cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(40):
-        try:
-            httpx.get(url, timeout=1.0)
-            print(f"started mock app at {url} (pid {proc.pid})")
+        if _server_build_hash(url) == expected:
+            print(f"started mock app at {url} (pid {proc.pid}, build {expected})")
             return proc
-        except httpx.HTTPError:
-            time.sleep(0.25)
+        time.sleep(0.25)
     proc.terminate()
     raise SystemExit(f"mock app failed to start at {url}")
 

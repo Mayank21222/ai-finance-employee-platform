@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from mock_app import db, failures
 
 app = FastAPI(title="Mock Payables App")
+
+
+def build_hash() -> str:
+    """Short hash of this module's source; lets run.py detect a stale server."""
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
+
+@app.get("/health")
+def health() -> JSONResponse:
+    return JSONResponse({"status": "ok", "build_hash": build_hash()})
 
 
 def _page(title: str, body: str) -> str:
