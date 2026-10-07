@@ -343,3 +343,300 @@ def agents_fragment(agents: list[dict], run_active: bool) -> str:
     note = ('<p class="dim">Live while a run is active; tool toggles apply '
             "from the next run.</p>") if run_active else ""
     return f"<table>{head}{''.join(rows)}</table>{note}"
+
+
+def mermaid_diagram(cfg: dict) -> str:
+    lines = ["flowchart LR"]
+    node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
+
+    def mid(value: str) -> str:
+        return str(value).replace('"', "")
+
+    for n in cfg.get("nodes", []):
+        nid = mid(n["node_id"])
+        kind = n.get("type", "?")
+        if kind == "verify":
+            lines.append(f'    {nid}{{"{nid}<br/>verify"}}')
+        elif kind == "message":
+            lines.append(f'    {nid}("{nid}<br/>message")')
+        else:
+            lines.append(f'    {nid}["{nid}<br/>{kind}"]')
+    start = mid(cfg.get("start_node_id", ""))
+    if start in node_ids:
+        lines.append(f"    start([start]) --> {start}")
+    for n in cfg.get("nodes", []):
+        nid = mid(n["node_id"])
+        for target in n.get("next_node_ids") or []:
+            if str(target) in node_ids:
+                lines.append(f"    {nid} --> {mid(target)}")
+        fb = n.get("fallback_next")
+        if fb and str(fb) in node_ids:
+            lines.append(f"    {nid} -. fallback .-> {mid(fb)}")
+        if n.get("type") == "verify":
+            lines.append(f'    {nid} -- match --> {mid(n["match_next"])}')
+            lines.append(f'    {nid} -- mismatch --> {mid(n["mismatch_next"])}')
+    return "\n".join(lines)
+
+
+def validation_panel(errors: list[str] | None = None) -> str:
+    if errors is None:
+        return ('<div class="panel" id="validation"><span class="dim">'
+                "Click ‘Validate flow’ to check the config.</span></div>")
+    if not errors:
+        return ('<div class="panel" id="validation">'
+                '<span class="ok">Flow is valid.</span></div>')
+    lis = "".join(f"<li>{esc(e)}</li>" for e in errors)
+    return ('<div class="panel" id="validation">'
+            f'<span class="err">Flow has {len(errors)} problem(s):</span>'
+            f"<ul>{lis}</ul></div>")
+
+
+def flow_page(cfg: dict, errors: list[str] | None = None) -> str:
+    node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
+    options = "".join(f'<option value="{esc(i)}">{esc(i)}</option>'
+                      for i in node_ids)
+    rows = []
+    for n in cfg.get("nodes", []):
+        kind = n.get("type", "?")
+        conns = []
+        for target in n.get("next_node_ids") or []:
+            conns.append(
+                f'<span class="badge">{esc(kind[:1])}→{esc(target)}</span> '
+                f'<form method="post" action="/flow/connections/remove" '
+                f'class="row" style="display:inline">'
+                f'<input type="hidden" name="source" value="{esc(n["node_id"])}">'
+                f'<input type="hidden" name="destination" '
+                f'value="{esc(target)}"><button>×</button></form>'
+            )
+        fb = n.get("fallback_next")
+        fb_html = (f'<span class="badge">fallback→{esc(fb)}</span>'
+                   if fb else "")
+        if kind == "verify":
+            conns = [f'<span class="badge">match→{esc(n["match_next"])}</span>',
+                     f'<span class="badge">mismatch→{esc(n["mismatch_next"])}</span>']
+        rows.append(
+            f'<tr><td class="mono"><strong>{esc(n["node_id"])}</strong>'
+            f'{" <span class=badge>start</span>" if n["node_id"] == cfg.get("start_node_id") else ""}</td>'
+            f"<td>{esc(kind)}</td><td>{' '.join(conns)} {fb_html}</td></tr>"
+        )
+    diagram = esc(mermaid_diagram(cfg))
+    return page(
+        "Flow editor",
+        f"""
+<h1>Flow editor</h1>
+<div class="row">
+  <button hx-post="/flow/validate" hx-target="#validation"
+          hx-swap="innerHTML">Validate flow</button>
+  <span class="dim">Saved config: configs/finance_employee.json</span>
+</div>
+{validation_panel(errors)}
+<h2>Connections</h2>
+<form method="post" action="/flow/connections" class="row">
+  <select name="source">{options}</select>
+  <span class="dim">→</span>
+  <select name="destination">{options}</select>
+  <button class="primary">Add connection</button>
+</form>
+<table>
+<tr><th>Node</th><th>Type</th><th>Outgoing connections</th></tr>
+{"".join(rows)}
+</table>
+<h2>Diagram</h2>
+<pre class="mermaid" id="flowdiag">{diagram}</pre>
+<script src="/static/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({{ startOnLoad: true, theme: "dark" }});
+  document.body.addEventListener("htmx:afterSwap", function () {{
+    mermaid.run({{ query: "#flowdiag" }});
+  }});
+</script>""",
+        active="flow",
+    )
+
+
+def agents_page(cfg: dict, message: str = "") -> str:
+    all_tools = _registry_names()
+    cards = []
+    for n in cfg.get("nodes", []):
+        if n.get("type") != "agent":
+            continue
+        node_id = n["node_id"]
+        fallback = n.get("fallback_next") or ""
+        targets = "".join(
+            f'<option value="{esc(i)}" '
+            f'{"selected" if i == fallback else ""}>{esc(i)}</option>'
+            for i in [t["node_id"] for t in cfg.get("nodes", [])]
+        )
+        badges = "".join(
+            tool_badge(node_id, t, t in (n.get("tools_enabled") or []))
+            for t in all_tools
+        )
+        cards.append(f"""
+<div class="panel">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">{esc(node_id)}</h2>
+    <span class="dim mono">save_as: {esc(n.get("save_as") or "—")}</span>
+  </div>
+  <form method="post" action="/agents/{esc(node_id)}">
+    <p><label class="dim">System prompt (file path or inline text)</label>
+    <textarea name="system_prompt" rows="4" style="width:100%"
+      >{esc(n.get("system_prompt") or "")}</textarea></p>
+    <p><label class="dim">Instructions</label>
+    <textarea name="instructions" rows="5" style="width:100%"
+      >{esc(n.get("instructions") or "")}</textarea></p>
+    <div class="row">
+      <label class="dim">Save answer as
+        <input name="save_as" value="{esc(n.get("save_as") or "")}"
+               placeholder="session variable name"></label>
+      <label class="dim">Fallback next
+        <select name="fallback_next">{targets}</select></label>
+      <button class="primary">Save agent</button>
+    </div>
+  </form>
+  <p class="row">{badges}</p>
+</div>""")
+    node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
+    targets = "".join(f'<option value="{esc(i)}">{esc(i)}</option>'
+                      for i in node_ids)
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    return page(
+        "Agents",
+        f"""
+<h1>Agents</h1>
+{msg}
+{"".join(cards) or '<p class="dim">No agent nodes in this flow.</p>'}
+<h2>New agent node</h2>
+<form method="post" action="/agents" class="row">
+  <input name="node_id" placeholder="node id (e.g. review_agent)" required
+         pattern="[A-Za-z0-9_]+">
+  <select name="next_node_ids">{targets}</select>
+  <select name="fallback_next"><option value="">no fallback</option>
+    {targets}</select>
+  <button class="primary">Create agent</button>
+</form>
+<p class="dim">New nodes join the flow from the selected next node; edits
+and tool toggles apply from the next run.</p>""",
+        active="agents",
+    )
+
+
+def messages_page(cfg: dict, message: str = "") -> str:
+    var_names: list[str] = []
+    for n in cfg.get("nodes", []):
+        if n.get("type") == "agent" and n.get("save_as"):
+            var_names.append(str(n["save_as"]))
+    var_options = "".join(f'<option value="{esc(v)}">{esc(v)}</option>'
+                          for v in var_names)
+    node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
+    forms = []
+    for n in cfg.get("nodes", []):
+        if n.get("type") != "message":
+            continue
+        node_id = n["node_id"]
+        opts = "".join(
+            f'<option value="{esc(i)}" '
+            f'{"selected" if i in (n.get("next_node_ids") or []) else ""}>'
+            f"{esc(i)}</option>"
+            for i in node_ids
+        )
+        fb = n.get("fallback_next") or ""
+        fb_opts = "".join(
+            f'<option value="{esc(i)}" {"selected" if i == fb else ""}>'
+            f"{esc(i)}</option>" for i in node_ids
+        )
+        forms.append(f"""
+<div class="panel">
+  <h2 style="margin-top:0">{esc(node_id)}</h2>
+  <form method="post" action="/messages/{esc(node_id)}">
+    <textarea name="template" rows="3" style="width:100%"
+              id="tpl-{esc(node_id)}">{esc(n.get("template") or "")}</textarea>
+    <div class="row" style="margin-top:8px">
+      <label class="dim">insert variable
+        <select class="var-insert" data-target="tpl-{esc(node_id)}">
+          <option value="">choose…</option>{var_options}
+        </select></label>
+      <label class="dim">next <select name="next_node_id">{opts}</select></label>
+      <label class="dim">fallback when unset
+        <select name="fallback_next">{fb_opts}</select></label>
+      <button class="primary">Save message</button>
+    </div>
+  </form>
+</div>""")
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    script = """<script>
+  document.querySelectorAll(".var-insert").forEach(function (sel) {
+    sel.addEventListener("change", function () {
+      if (!sel.value) return;
+      var ta = document.getElementById(sel.dataset.target);
+      var ins = "{{vars." + sel.value + "}}";
+      var pos = ta.selectionStart || ta.value.length;
+      ta.value = ta.value.slice(0, pos) + ins + ta.value.slice(pos);
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = pos + ins.length;
+      sel.value = "";
+    });
+  });
+</script>"""
+    return page(
+        "Message nodes",
+        f"""
+<h1>Message nodes</h1>
+{msg}
+{"".join(forms) or '<p class="dim">No message nodes in this flow.</p>'}
+{script}""",
+        active="messages",
+    )
+
+
+def documents_page(tenant: str, tenants: list[str], files: list[str],
+                   agents: list[str], attachments: dict[str, list[str]],
+                   error: str = "") -> str:
+    tenant_opts = "".join(
+        f'<option value="{esc(t)}" {"selected" if t == tenant else ""}>'
+        f"{esc(t)}</option>" for t in tenants
+    )
+    rows = []
+    for f in files:
+        boxes = "".join(
+            f'<label class="dim" style="margin-right:10px">'
+            f'<input type="checkbox" name="agents" value="{esc(a)}" '
+            f'{"checked" if f in attachments.get(a, []) else ""}>'
+            f"{esc(a)}</label>"
+            for a in agents
+        )
+        rows.append(
+            f'<tr><td class="mono">{esc(f)}</td>'
+            f'<td><form method="post" action="/documents/attach" class="row">'
+            f'<input type="hidden" name="tenant" value="{esc(tenant)}">'
+            f'<input type="hidden" name="filename" value="{esc(f)}">'
+            f"{boxes}<button>Save attachments</button></form></td></tr>"
+        ) or ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Documents",
+        f"""
+<h1>Documents</h1>
+{err}
+<form method="post" action="/documents/upload" enctype="multipart/form-data"
+      class="row">
+  <select name="tenant">{tenant_opts}</select>
+  <input type="file" name="file" accept=".txt,.md,.csv,.json,.pdf" required>
+  <button class="primary">Upload</button>
+  <span class="dim">stored under company_data/&lt;tenant&gt;/</span>
+</form>
+<h2>Files in company_data/{esc(tenant)}/</h2>
+<table>
+<tr><th>File</th><th>Attach to agents</th></tr>
+{"".join(rows) or '<tr><td colspan="2" class="dim">No files yet.</td></tr>'}
+</table>
+<p class="dim">Attached documents are injected into the agent's prompt
+(next run). PDFs are stored but currently injected only if they contain
+utf-8 text.</p>""",
+        active="documents",
+    )
+
+
+def _registry_names() -> list[str]:
+    from ai_operator.tools import registry
+
+    return registry.names()

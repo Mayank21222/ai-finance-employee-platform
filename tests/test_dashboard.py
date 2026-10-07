@@ -235,3 +235,160 @@ def test_tool_toggle_roundtrip_on_shipped_config():
 def test_tool_toggle_rejects_unknown_tool():
     resp = client.post("/agents/ap_agent/tools/not_a_tool")
     assert resp.status_code == 404
+
+
+# --- flow editor / agents / messages / documents ---------------------------
+
+from ai_operator.graph import DEFAULT_FLOW_PATH as SHIPPED_CONFIG  # noqa: E402
+
+
+def _get_cfg():
+    import json as _j
+    return _j.loads(SHIPPED_CONFIG.read_text())
+
+
+def test_all_nav_pages_render():
+    for path, marker in [("/flow", "Flow editor"),
+                         ("/agents", "Agents"),
+                         ("/messages", "Message nodes"),
+                         ("/documents", "Documents")]:
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert marker in resp.text, path
+    flow = client.get("/flow").text
+    assert "mermaid.min.js" in flow and "flowchart LR" in flow
+    assert 'hx-post="/flow/validate"' in flow
+
+
+def test_validate_endpoint_reports_valid_shipped_flow():
+    resp = client.post("/flow/validate")
+    assert resp.status_code == 200
+    assert "Flow is valid" in resp.text
+
+
+def test_flow_connection_add_and_remove_roundtrip():
+    original = SHIPPED_CONFIG.read_text()
+    try:
+        resp = client.post("/flow/connections", data={
+            "source": "ap_agent", "destination": "report"},
+            follow_redirects=False)
+        assert resp.status_code == 303
+        cfg = _get_cfg()
+        ap = next(n for n in cfg["nodes"] if n["node_id"] == "ap_agent")
+        assert "report" in ap["next_node_ids"]
+
+        resp = client.post("/flow/connections/remove", data={
+            "source": "ap_agent", "destination": "report"},
+            follow_redirects=False)
+        assert resp.status_code == 303
+        cfg = _get_cfg()
+        ap = next(n for n in cfg["nodes"] if n["node_id"] == "ap_agent")
+        assert "report" not in ap["next_node_ids"]
+    finally:
+        if SHIPPED_CONFIG.read_text() != original:
+            SHIPPED_CONFIG.write_text(original)
+
+
+def test_flow_connection_rejected_for_verify_node():
+    original = SHIPPED_CONFIG.read_text()
+    try:
+        resp = client.post("/flow/connections", data={
+            "source": "check_invoice", "destination": "report"},
+            follow_redirects=False)
+        assert resp.status_code == 400
+        assert "agent and message" in resp.text
+        assert SHIPPED_CONFIG.read_text() == original
+    finally:
+        if SHIPPED_CONFIG.read_text() != original:
+            SHIPPED_CONFIG.write_text(original)
+
+
+def test_agent_edit_and_duplicate_create():
+    original = SHIPPED_CONFIG.read_text()
+    try:
+        resp = client.post("/agents/ap_agent", data={
+            "system_prompt": "prompts/agent_ap.md",
+            "instructions": "edited instructions",
+            "save_as": "ap_answer", "fallback_next": "report"},
+            follow_redirects=False)
+        assert resp.status_code == 303
+        ap = next(n for n in _get_cfg()["nodes"]
+                  if n["node_id"] == "ap_agent")
+        assert ap["instructions"] == "edited instructions"
+
+        resp = client.post("/agents", data={
+            "node_id": "ap_agent", "next_node_ids": "report",
+            "fallback_next": ""}, follow_redirects=False)
+        assert resp.status_code == 400
+        assert "already exists" in resp.text
+    finally:
+        if SHIPPED_CONFIG.read_text() != original:
+            SHIPPED_CONFIG.write_text(original)
+
+
+def test_messages_page_empty_state_and_edit_404():
+    resp = client.get("/messages")
+    assert resp.status_code == 200
+    assert "No message nodes" in resp.text
+    resp = client.post("/messages/ghost", data={
+        "template": "x", "next_node_id": "e", "fallback_next": ""},
+        follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_documents_upload_attach_cycle():
+    import io
+
+    original = SHIPPED_CONFIG.read_text()
+    tenant_dir = SHIPPED_CONFIG.parents[1] / "company_data" / "acme"
+    uploaded = tenant_dir / "zz_dash_test_note.txt"
+    try:
+        resp = client.post("/documents/upload", data={"tenant": "acme"}, files={
+            "file": ("zz_dash_test_note.txt",
+                     io.BytesIO(b"dash test content"), "text/plain")},
+            follow_redirects=False)
+        assert resp.status_code == 303
+        assert uploaded.is_file()
+
+        resp = client.post("/documents/attach", data={
+            "tenant": "acme", "filename": "zz_dash_test_note.txt",
+            "agents": ["ap_agent"]}, follow_redirects=False)
+        assert resp.status_code == 303
+        ap = next(n for n in _get_cfg()["nodes"]
+                  if n["node_id"] == "ap_agent")
+        assert "company_data/acme/zz_dash_test_note.txt" in ap["documents"]
+
+        page = client.get("/documents?tenant=acme").text
+        assert "zz_dash_test_note.txt" in page
+
+        resp = client.post("/documents/attach", data={
+            "tenant": "acme", "filename": "zz_dash_test_note.txt"},  # unchecked
+            follow_redirects=False)
+        assert resp.status_code == 303
+        ap = next(n for n in _get_cfg()["nodes"]
+                  if n["node_id"] == "ap_agent")
+        assert "company_data/acme/zz_dash_test_note.txt" not in ap["documents"]
+    finally:
+        if SHIPPED_CONFIG.read_text() != original:
+            SHIPPED_CONFIG.write_text(original)
+        uploaded.unlink(missing_ok=True)
+
+
+def test_upload_rejects_bad_extension():
+    import io
+
+    resp = client.post("/documents/upload", data={"tenant": "acme"}, files={
+        "file": ("evil.exe", io.BytesIO(b"MZ"), "application/octet-stream")},
+        follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
+def test_mermaid_diagram_marks_edges():
+    from platform.dashboard.html import mermaid_diagram
+
+    out = mermaid_diagram(_get_cfg())
+    assert "start([start]) --> ap_agent" in out
+    assert "ap_agent -. fallback .-> report" in out
+    assert "check_invoice -- match -->" in out
+    assert "check_invoice -- mismatch -->" in out

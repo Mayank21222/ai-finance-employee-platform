@@ -12,14 +12,14 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse,
                                RedirectResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from ai_operator.graph import DEFAULT_FLOW_PATH
 from ai_operator.tracing import RUNS_ROOT
-from platform.dashboard import db, html, runner
+from platform.dashboard import db, flowcfg, html, runner
 from platform.flow.models import Flow, load_flow
 from platform.flow.validator import validate
 
@@ -313,3 +313,216 @@ def sessions_create(tenant: str = Form(...), currency: str = Form(...),
 def sessions_delete(session_id: int) -> Response:
     db.delete_session(session_id)
     return RedirectResponse("/sessions", status_code=303)
+
+
+# --- flow editor -----------------------------------------------------------
+
+
+@app.get("/flow", response_class=HTMLResponse, include_in_schema=False)
+def flow_page() -> str:
+    return html.flow_page(flowcfg.load_cfg())
+
+
+@app.post("/flow/validate", response_class=HTMLResponse, include_in_schema=False)
+def flow_validate() -> str:
+    return html.validation_panel(validate(flowcfg.load_flow()))
+
+
+@app.post("/flow/connections", include_in_schema=False)
+def flow_add_connection(source: str = Form(...),
+                        destination: str = Form(...)):
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if n.get("node_id") == source), None)
+    if node is None or node.get("type") not in ("agent", "message"):
+        return HTMLResponse(
+            html.page("Flow editor",
+                      '<h1 class="err">Only agent and message nodes accept '
+                      'added connections.</h1><p><a href="/flow">Back</a></p>',
+                      active="flow"),
+            status_code=400,
+        )
+    connections = node.setdefault("next_node_ids", [])
+    if destination not in connections:
+        connections.append(destination)
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        return HTMLResponse(
+            html.flow_page(cfg, errors=errors), status_code=400)
+    return RedirectResponse("/flow", status_code=303)
+
+
+@app.post("/flow/connections/remove", include_in_schema=False)
+def flow_remove_connection(source: str = Form(...),
+                           destination: str = Form(...)):
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if n.get("node_id") == source), None)
+    if node is not None:
+        connections = node.get("next_node_ids") or []
+        if destination in connections:
+            connections.remove(destination)
+            errors = flowcfg.save_cfg(cfg)
+            if errors:
+                return HTMLResponse(
+                    html.flow_page(cfg, errors=errors), status_code=400)
+    return RedirectResponse("/flow", status_code=303)
+
+
+# --- agents editor ---------------------------------------------------------
+
+
+@app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
+def agents_page(message: str = "") -> str:
+    return html.agents_page(flowcfg.load_cfg(), message=message)
+
+
+@app.post("/agents", include_in_schema=False)
+def agents_create(node_id: str = Form(...),
+                  next_node_ids: str = Form(...),
+                  fallback_next: str = Form("")):
+    cfg = flowcfg.load_cfg()
+    if any(n.get("node_id") == node_id for n in cfg.get("nodes", [])):
+        return HTMLResponse(
+            html.agents_page(
+                cfg, message=f"Node id '{node_id}' already exists."),
+            status_code=400,
+        )
+    cfg.setdefault("nodes", []).append({
+        "type": "agent", "node_id": node_id, "system_prompt": "",
+        "instructions": "", "documents": [], "tools_enabled": [],
+        "next_node_ids": [next_node_ids],
+        "fallback_next": fallback_next or None, "save_as": None,
+    })
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        return HTMLResponse(html.flow_page(cfg, errors=errors),
+                            status_code=400)
+    return RedirectResponse("/agents", status_code=303)
+
+
+@app.post("/agents/{node_id}", include_in_schema=False)
+def agents_edit(node_id: str, system_prompt: str = Form(""),
+                instructions: str = Form(""), save_as: str = Form(""),
+                fallback_next: str = Form("")):
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if n.get("node_id") == node_id and n.get("type") == "agent"),
+                None)
+    if node is None:
+        return Response(status_code=404)
+    node["system_prompt"] = system_prompt
+    node["instructions"] = instructions
+    node["save_as"] = save_as.strip() or None
+    node["fallback_next"] = fallback_next or None
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        return HTMLResponse(html.agents_page(cfg, message=errors[0]),
+                            status_code=400)
+    return RedirectResponse("/agents", status_code=303)
+
+
+# --- message nodes ---------------------------------------------------------
+
+
+@app.get("/messages", response_class=HTMLResponse, include_in_schema=False)
+def messages_page(message: str = "") -> str:
+    return html.messages_page(flowcfg.load_cfg(), message=message)
+
+
+@app.post("/messages/{node_id}", include_in_schema=False)
+def messages_edit(node_id: str, template: str = Form(...),
+                  next_node_id: str = Form(...),
+                  fallback_next: str = Form("")):
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if n.get("node_id") == node_id
+                 and n.get("type") == "message"), None)
+    if node is None:
+        return Response(status_code=404)
+    node["template"] = template
+    node["next_node_ids"] = [next_node_id]
+    node["fallback_next"] = fallback_next or None
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        return HTMLResponse(html.messages_page(cfg, message=errors[0]),
+                            status_code=400)
+    return RedirectResponse("/messages", status_code=303)
+
+
+# --- documents -------------------------------------------------------------
+
+
+def _company_dir(tenant: str) -> Path:
+    return Path(__file__).resolve().parents[2] / "company_data" / tenant
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = Path(name).name
+    cleaned = "".join(c for c in cleaned if c.isalnum() or c in "._- ")
+    return cleaned.strip() or "upload.txt"
+
+
+@app.get("/documents", response_class=HTMLResponse, include_in_schema=False)
+def documents_page(tenant: str = "", error: str = "") -> str:
+    sessions = db.list_sessions()
+    tenants = sorted({s["tenant"] for s in sessions})
+    tenant = tenant or (tenants[0] if tenants else "acme")
+    target = _company_dir(tenant)
+    files = sorted(str(p.relative_to(target))
+                   for p in target.rglob("*") if p.is_file()
+                   ) if target.is_dir() else []
+    cfg = flowcfg.load_cfg()
+    agents = [n["node_id"] for n in cfg.get("nodes", [])
+              if n.get("type") == "agent"]
+    attachments = {n["node_id"]: list(n.get("documents") or [])
+                   for n in cfg.get("nodes", []) if n.get("type") == "agent"}
+    return html.documents_page(tenant, tenants, files, agents,
+                               attachments, error=error)
+
+
+@app.post("/documents/upload", include_in_schema=False)
+async def documents_upload(tenant: str = Form(...),
+                           file: UploadFile = File(...)):
+    name = _safe_filename(file.filename or "upload.txt")
+    if Path(name).suffix.lower() not in (".txt", ".md", ".csv", ".json",
+                                         ".pdf"):
+        from urllib.parse import quote
+
+        return RedirectResponse(
+            "/documents?error=" + quote("Only txt, md, csv, json, pdf files."),
+            status_code=303)
+    target = _company_dir(tenant)
+    target.mkdir(parents=True, exist_ok=True)
+    body = await file.read()
+    if len(body) > 2_000_000:
+        from urllib.parse import quote
+
+        return RedirectResponse(
+            "/documents?error=" + quote("File larger than 2MB."),
+            status_code=303)
+    (target / name).write_bytes(body)
+    return RedirectResponse(f"/documents?tenant={tenant}", status_code=303)
+
+
+@app.post("/documents/attach", include_in_schema=False)
+def documents_attach(tenant: str = Form(...), filename: str = Form(...),
+                     agents: list[str] = Form(default=[])):
+    rel = f"company_data/{tenant}/{filename}"
+    cfg = flowcfg.load_cfg()
+    for node in cfg.get("nodes", []):
+        if node.get("type") != "agent":
+            continue
+        docs = node.setdefault("documents", [])
+        should = node["node_id"] in agents
+        if should and rel not in docs:
+            docs.append(rel)
+        elif not should and rel in docs:
+            docs.remove(rel)
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        from urllib.parse import quote
+
+        return RedirectResponse("/documents?error=" + quote(errors[0][:200]),
+                                status_code=303)
+    return RedirectResponse(f"/documents?tenant={tenant}", status_code=303)
