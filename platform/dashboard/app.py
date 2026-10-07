@@ -42,6 +42,24 @@ def _shutdown() -> None:
     runner.shutdown()
 
 
+def _mode(request: Request) -> str:
+    """Phase 4: usage vs configuration mode, persisted in a cookie."""
+    mode = str(request.cookies.get("app_mode", "use"))
+    return mode if mode in ("use", "configure") else "use"
+
+
+@app.get("/mode/{mode}", include_in_schema=False)
+def mode_switch(mode: str, request: Request):
+    """Toggle the dashboard between usage and configuration mode."""
+    if mode not in ("use", "configure"):
+        return RedirectResponse(
+            request.headers.get("referer") or "/runs", status_code=303)
+    response = RedirectResponse(
+        request.headers.get("referer") or "/runs", status_code=303)
+    response.set_cookie("app_mode", mode, path="/", max_age=60 * 60 * 24 * 365)
+    return response
+
+
 def _trace_events(run_id: str) -> list[dict]:
     path = RUNS_ROOT / run_id / "trace.jsonl"
     if not path.exists():
@@ -115,8 +133,9 @@ def home() -> RedirectResponse:
 
 
 @app.get("/runs", response_class=HTMLResponse, include_in_schema=False)
-def runs_page() -> str:
-    return html.runs_page(db.list_runs(), db.list_sessions())
+def runs_page(request: Request) -> str:
+    return html.runs_page(db.list_runs(), db.list_sessions(),
+                          mode=_mode(request))
 
 
 @app.post("/runs", include_in_schema=False)
@@ -138,7 +157,7 @@ def start_run(session_id: int = Form(...), task: str = Form(...),
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse,
          include_in_schema=False)
-def run_detail(run_id: str):
+def run_detail(run_id: str, request: Request):
     row = db.get_run(run_id)
     if row is None:
         return HTMLResponse(html.not_found(f"No run '{run_id}'."), status_code=404)
@@ -194,6 +213,7 @@ def run_detail(run_id: str):
         report=_report(run_id), error=error, agents_html=agents_html,
         run_active=run_active, state=state, resume=orphaned_waiting,
         resume_question=resume_question, approval_panel=approval_panel,
+        mode=_mode(request),
     )
 
 
@@ -292,8 +312,8 @@ def resume_run(run_id: str, answer: str = Form(...)):
 
 
 @app.get("/history", response_class=HTMLResponse, include_in_schema=False)
-def history_page() -> str:
-    return html.history_page(db.list_runs(limit=200))
+def history_page(request: Request) -> str:
+    return html.history_page(db.list_runs(limit=200), mode=_mode(request))
 
 
 @app.get("/runs/{run_id}/trace", include_in_schema=False)
@@ -410,8 +430,8 @@ def sessions_delete(session_id: int) -> Response:
 
 
 @app.get("/flow", response_class=HTMLResponse, include_in_schema=False)
-def flow_page() -> str:
-    return html.flow_page(flowcfg.load_cfg())
+def flow_page(request: Request) -> str:
+    return html.flow_page(flowcfg.load_cfg(), mode=_mode(request))
 
 
 @app.post("/flow/validate", response_class=HTMLResponse, include_in_schema=False)
@@ -464,8 +484,9 @@ def flow_remove_connection(source: str = Form(...),
 
 
 @app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
-def agents_page(message: str = "") -> str:
-    return html.agents_page(flowcfg.load_cfg(), message=message)
+def agents_page(request: Request, message: str = "") -> str:
+    return html.agents_page(flowcfg.load_cfg(), message=message,
+                            mode=_mode(request))
 
 
 @app.post("/agents", include_in_schema=False)
@@ -517,8 +538,9 @@ def agents_edit(node_id: str, system_prompt: str = Form(""),
 
 
 @app.get("/messages", response_class=HTMLResponse, include_in_schema=False)
-def messages_page(message: str = "") -> str:
-    return html.messages_page(flowcfg.load_cfg(), message=message)
+def messages_page(request: Request, message: str = "") -> str:
+    return html.messages_page(flowcfg.load_cfg(), message=message,
+                              mode=_mode(request))
 
 
 @app.post("/messages", include_in_schema=False)
@@ -578,7 +600,7 @@ def _safe_filename(name: str) -> str:
 
 
 @app.get("/documents", response_class=HTMLResponse, include_in_schema=False)
-def documents_page(tenant: str = "", error: str = "") -> str:
+def documents_page(request: Request, tenant: str = "", error: str = "") -> str:
     sessions = db.list_sessions()
     tenants = sorted({s["tenant"] for s in sessions})
     tenant = tenant or (tenants[0] if tenants else "acme")
@@ -592,7 +614,8 @@ def documents_page(tenant: str = "", error: str = "") -> str:
     attachments = {n["node_id"]: list(n.get("documents") or [])
                    for n in cfg.get("nodes", []) if n.get("type") == "agent"}
     return html.documents_page(tenant, tenants, files, agents,
-                               attachments, error=error)
+                               attachments, error=error,
+                               mode=_mode(request))
 
 
 @app.post("/documents/upload", include_in_schema=False)

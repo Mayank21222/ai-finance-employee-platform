@@ -8,14 +8,19 @@ from html import escape
 from pathlib import Path
 
 NAV = [
-    ("runs", "/runs", "Run console"),
-    ("history", "/history", "History"),
-    ("sessions", "/sessions", "Sessions"),
-    ("agents", "/agents", "Agents"),
-    ("flow", "/flow", "Flow editor"),
-    ("documents", "/documents", "Documents"),
-    ("messages", "/messages", "Message nodes"),
+    ("runs", "/runs", "Run console", "run"),
+    ("history", "/history", "History", "run"),
+    ("audit", "/audit", "Audit trail", "run"),
+    ("models", "/models", "Data models", "edit"),
+    ("connectors", "/connectors", "Connectors", "edit"),
+    ("sessions", "/sessions", "Sessions", "edit"),
+    ("agents", "/agents", "Agents", "edit"),
+    ("flow", "/flow", "Flow editor", "edit"),
+    ("documents", "/documents", "Documents", "edit"),
+    ("messages", "/messages", "Message nodes", "edit"),
 ]
+
+MODES = ("use", "configure")
 
 _CSS = """
   :root { --bg:#0f141a; --panel:#171e26; --line:#2a3441; --fg:#d7dee7;
@@ -86,6 +91,14 @@ _CSS = """
   .badge-tool { cursor:pointer; }
   .badge-tool.on { color:var(--ok); border-color:var(--ok); }
   .badge-tool.off { color:var(--dim); opacity:.55; }
+  .mode-toggle { margin-left:auto; }
+  .mode-toggle a { border:1px solid var(--acc); border-radius:5px;
+                   padding:5px 12px; color:var(--acc); text-decoration:none; }
+  .mode-toggle a:hover { background:var(--acc); color:#06121f; }
+  /* Phase 4: usage vs configuration mode. The body data-mode attribute
+     switches which sections (and nav links) are visible. */
+  [data-mode="use"] .mode-edit { display:none; }
+  [data-mode="configure"] .mode-run { display:none; }
 """
 
 
@@ -93,12 +106,16 @@ def esc(value: object) -> str:
     return escape(str(value), quote=True)
 
 
-def page(title: str, body: str, active: str = "") -> str:
+def page(title: str, body: str, active: str = "", mode: str = "use") -> str:
+    mode = mode if mode in MODES else "use"
     nav = "".join(
-        f'<a href="{href}" class="{"active" if key == active else ""}">'
+        f'<a href="{href}" class="{"active" if key == active else ""} '
+        f'mode-{"run" if kind == "run" else "edit"}">'
         f"{label}</a>"
-        for key, href, label in NAV
+        for key, href, label, kind in NAV
     )
+    other = "use" if mode == "configure" else "configure"
+    toggle_label = "Use this app" if mode == "configure" else "Configure"
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -106,10 +123,11 @@ def page(title: str, body: str, active: str = "") -> str:
 <title>{esc(title)} · Comp Ops</title>
 <script src="/static/htmx.min.js"></script>
 <style>{_CSS}</style>
-</head><body>
+</head><body data-mode="{mode}">
 <header>
   <span class="brand">COMP OPS</span>
   <nav>{nav}</nav>
+  <span class="mode-toggle"><a href="/mode/{other}">{toggle_label}</a></span>
 </header>
 <main>
 {body}
@@ -117,7 +135,8 @@ def page(title: str, body: str, active: str = "") -> str:
 </body></html>"""
 
 
-def sessions_page(sessions: list[dict], error: str = "") -> str:
+def sessions_page(sessions: list[dict], error: str = "",
+                  mode: str = "use") -> str:
     rows = "".join(
         f"<tr><td>{s['id']}</td><td>{esc(s['tenant'])}</td>"
         f"<td>{esc(s['currency'])}</td><td>{s['approval_threshold']}</td>"
@@ -151,11 +170,12 @@ def sessions_page(sessions: list[dict], error: str = "") -> str:
 </form>
 <p class="dim">Runs are linked to a session by ID; the session supplies
 tenant, currency, approval threshold and user role at start.</p>""",
-        active="sessions",
+        active="sessions", mode=mode,
     )
 
 
-def runs_page(runs: list[dict], sessions: list[dict]) -> str:
+def runs_page(runs: list[dict], sessions: list[dict],
+              mode: str = "use") -> str:
     rows = "".join(
         f'<tr><td class="mono"><a href="/runs/{esc(r["run_id"])}" '
         f'style="color:var(--acc)">{esc(r["run_id"])}</a></td>'
@@ -196,11 +216,11 @@ def runs_page(runs: list[dict], sessions: list[dict]) -> str:
 <th>Started</th></tr>
 {rows}
 </table>""",
-        active="runs",
+        active="runs", mode=mode,
     )
 
 
-def history_page(runs: list[dict]) -> str:
+def history_page(runs: list[dict], mode: str = "use") -> str:
     """Phase-3 runs history: state, task, session, when, trace/evidence links."""
     rows = ""
     for r in runs:
@@ -234,11 +254,11 @@ or cancel).</p>
 <tr><th>Run</th><th>State</th><th>Task</th><th>Session</th><th>Started</th>
 <th>Finished</th><th>Artifacts</th></tr>
 """ + rows + "</table>",
-        active="history",
+        active="history", mode=mode,
     )
 
 
-def evidence_index_page(run_id: str, names: list[str]) -> str:
+def evidence_index_page(run_id: str, names: list[str], mode: str = "use") -> str:
     items = "".join(
         f'<li><a class="mono" href="/runs/{esc(run_id)}/evidence/'
         f'{esc(n)}">{esc(n)}</a></li>' for n in names
@@ -247,7 +267,7 @@ def evidence_index_page(run_id: str, names: list[str]) -> str:
         f"Evidence {run_id}",
         f'<h1>Evidence · <span class="mono">{esc(run_id)}</span></h1>'
         f'<ul>{items}</ul>',
-        active="history",
+        active="history", mode=mode,
     )
 
 
@@ -431,7 +451,7 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
                     error: str | None, agents_html: str, run_active: bool,
                     state: str = "", resume: bool = False,
                     resume_question: str = "",
-                    approval_panel: str = "") -> str:
+                    approval_panel: str = "", mode: str = "use") -> str:
     sess = (
         f'#{session["id"]} {esc(session["tenant"])} {esc(session["currency"])} '
         f'&gt;{session["approval_threshold"]} ({esc(session["user_role"])})'
@@ -539,7 +559,7 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
 <div id="agents" {poll}>{agents_html}</div>
 {report_html}
 {script}"""
-    return page(f"Run {run_id}", body, active="runs")
+    return page(f"Run {run_id}", body, active="runs", mode=mode)
 
 
 def agents_fragment(agents: list[dict], run_active: bool) -> str:
@@ -616,7 +636,8 @@ def validation_panel(errors: list[str] | None = None) -> str:
             f"<ul>{lis}</ul></div>")
 
 
-def flow_page(cfg: dict, errors: list[str] | None = None) -> str:
+def flow_page(cfg: dict, errors: list[str] | None = None,
+              mode: str = "use") -> str:
     node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
     options = "".join(f'<option value="{esc(i)}">{esc(i)}</option>'
                       for i in node_ids)
@@ -675,11 +696,11 @@ def flow_page(cfg: dict, errors: list[str] | None = None) -> str:
     mermaid.run({{ query: "#flowdiag" }});
   }});
 </script>""",
-        active="flow",
+        active="flow", mode=mode,
     )
 
 
-def agents_page(cfg: dict, message: str = "") -> str:
+def agents_page(cfg: dict, message: str = "", mode: str = "use") -> str:
     all_tools = _registry_names()
     cards = []
     for n in cfg.get("nodes", []):
@@ -741,11 +762,11 @@ def agents_page(cfg: dict, message: str = "") -> str:
 </form>
 <p class="dim">New nodes join the flow from the selected next node; edits
 and tool toggles apply from the next run.</p>""",
-        active="agents",
+        active="agents", mode=mode,
     )
 
 
-def messages_page(cfg: dict, message: str = "") -> str:
+def messages_page(cfg: dict, message: str = "", mode: str = "use") -> str:
     var_names: list[str] = []
     for n in cfg.get("nodes", []):
         if n.get("type") == "agent" and n.get("save_as"):
@@ -826,13 +847,13 @@ runaway loops.</p>"""
 {"".join(forms) or '<p class="dim">No message nodes in this flow.</p>'}
 {create}
 {script}""",
-        active="messages",
+        active="messages", mode=mode,
     )
 
 
 def documents_page(tenant: str, tenants: list[str], files: list[str],
                    agents: list[str], attachments: dict[str, list[str]],
-                   error: str = "") -> str:
+                   error: str = "", mode: str = "use") -> str:
     tenant_opts = "".join(
         f'<option value="{esc(t)}" {"selected" if t == tenant else ""}>'
         f"{esc(t)}</option>" for t in tenants
@@ -874,7 +895,7 @@ def documents_page(tenant: str, tenants: list[str], files: list[str],
 <p class="dim">Attached documents are injected into the agent's prompt
 (next run). PDFs are stored but currently injected only if they contain
 utf-8 text.</p>""",
-        active="documents",
+        active="documents", mode=mode,
     )
 
 
