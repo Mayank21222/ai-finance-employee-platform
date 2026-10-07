@@ -91,6 +91,10 @@ class Flow(BaseModel):
     start_node_id: str
     session_context: SessionContextBlock
     nodes: list[FlowNode] = Field(default_factory=list)
+    max_visits_per_node: int = 3
+    """Platform default: how often one flow node may be entered per run."""
+    max_total_visits: int = 40
+    """Platform default: total flow-node entries allowed per run."""
 
     def node_map(self) -> dict[str, FlowNode]:
         return {node.node_id: node for node in self.nodes}

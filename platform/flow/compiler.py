@@ -43,19 +43,66 @@ def compile_flow(flow: Flow, client: Any) -> StateGraph:
     graph = StateGraph(AgentState)
     for node in flow.nodes:
         if isinstance(node, AgentNode):
-            _add_agent(graph, node, client, first_end)
+            _add_agent(graph, node, client, first_end, flow)
         elif isinstance(node, MessageNode):
-            _add_message(graph, node, first_end)
+            _add_message(graph, node, first_end, flow)
         elif isinstance(node, VerifyNode):
-            _add_verify(graph, node, first_end)
+            _add_verify(graph, node, first_end, flow)
         elif isinstance(node, EndNode):
+            # End nodes are never visit-limited: the final report must always
+            # be constructible, and loops burn the per-node limit first.
             graph.add_node(node.node_id, finish.run_finish)
             graph.add_edge(node.node_id, END)
     graph.add_edge(START, flow.start_node_id)
     return graph
 
 
-def _add_agent(graph: StateGraph, node: AgentNode, client: Any, first_end: str) -> None:
+def _with_visit_limit(flow: Flow, node_id: str, fn: Any) -> Any:
+    """Wrap a flow node: count entries, stop the run when a limit is hit."""
+
+    def guarded(state: AgentState) -> dict:
+        run_id = state["run_id"]
+        visits = dict(state.get("node_visits") or {})
+        count = visits.get(node_id, 0)
+        total = sum(visits.values())
+        if count >= flow.max_visits_per_node or total >= flow.max_total_visits:
+            limit = (
+                flow.max_visits_per_node if count >= flow.max_visits_per_node
+                else flow.max_total_visits
+            )
+            recent = list(state.get("history") or [])[-5:]
+            last_steps = "; ".join(
+                str(h.get("detail", ""))[:120] for h in recent
+            ) or "(no steps yet)"
+            error = (
+                f"Visit limit hit at node '{node_id}' (limit {limit}). "
+                f"Last steps: {last_steps}"
+            )
+            trace_event(run_id, "visit_limit_hit", node=node_id,
+                        visits=count, total=total, limit=limit)
+            return {
+                "status": "needs_human",
+                "node_visits": visits,
+                "errors": [error],
+                "last_observation": error,
+                "history": [{
+                    "step": int(state.get("step_count", 0)),
+                    "kind": "error",
+                    "detail": error,
+                    "ok": False,
+                }],
+            }
+        updates = fn(state)
+        visits[node_id] = count + 1
+        updates["node_visits"] = visits
+        return updates
+
+    return guarded
+
+
+def _add_agent(
+    graph: StateGraph, node: AgentNode, client: Any, first_end: str, flow: Flow
+) -> None:
     nid = node.node_id
     persona = _resolve_system_prompt(node.system_prompt)
     documents = _load_documents(node.documents)
@@ -85,11 +132,18 @@ def _add_agent(graph: StateGraph, node: AgentNode, client: Any, first_end: str) 
     def execute_node(state: AgentState, config: RunnableConfig) -> dict:
         return execute.run_execute(state, config, allowed_tools=allowed_tools)
 
-    graph.add_node(nid, entry)
+    def route_after_entry(state: AgentState) -> str:
+        return "decide" if state.get("status") == "running" else "fallback"
+
+    graph.add_node(nid, _with_visit_limit(flow, nid, entry))
     graph.add_node(f"{nid}/decide", decide_node)
     graph.add_node(f"{nid}/execute", execute_node)
     graph.add_node(f"{nid}/ask", ask.run_ask)
-    graph.add_edge(nid, f"{nid}/decide")
+    graph.add_conditional_edges(
+        nid,
+        route_after_entry,
+        {"decide": f"{nid}/decide", "fallback": node.fallback_next or first_end},
+    )
     graph.add_conditional_edges(
         f"{nid}/decide",
         _agent_router(),
@@ -121,7 +175,9 @@ def _agent_router():
     return route
 
 
-def _add_message(graph: StateGraph, node: MessageNode, first_end: str) -> None:
+def _add_message(
+    graph: StateGraph, node: MessageNode, first_end: str, flow: Flow
+) -> None:
     referenced = Flow.template_variables(node)
     has_fallback = bool(node.fallback_next)
 
@@ -133,7 +189,7 @@ def _add_message(graph: StateGraph, node: MessageNode, first_end: str) -> None:
         if missing:
             rendered = (
                 f"TEMPLATE ERROR in message node '{node.node_id}': variable(s) "
-                f"{', '.join(missing)} are not set yet."
+                f"{', '.join(repr(v) for v in missing)} are not set yet."
             )
             trace_event(run_id, "message_rendered", node=node.node_id,
                         missing=missing, error=True)
@@ -156,20 +212,30 @@ def _add_message(graph: StateGraph, node: MessageNode, first_end: str) -> None:
 
     def route(state: AgentState) -> str:
         variables = state.get("variables") or {}
+        # Missing-var fallback wins even when the run is already ending, so
+        # the error message's fallback still gets to render.
         if has_fallback and any(v not in variables for v in referenced):
             return "fallback"
+        if state.get("status") != "running":
+            return "end"
         return "next"
 
-    graph.add_node(node.node_id, render)
+    graph.add_node(node.node_id, _with_visit_limit(flow, node.node_id, render))
     primary = Flow.primary_next(node) or first_end
     graph.add_conditional_edges(
         node.node_id,
         route,
-        {"next": primary, "fallback": node.fallback_next or primary},
+        {
+            "next": primary,
+            "fallback": node.fallback_next or primary,
+            "end": first_end,
+        },
     )
 
 
-def _add_verify(graph: StateGraph, node: VerifyNode, first_end: str) -> None:
+def _add_verify(
+    graph: StateGraph, node: VerifyNode, first_end: str, flow: Flow
+) -> None:
     def run(state: AgentState) -> dict:
         trace_event(state["run_id"], "node_entered", node=node.node_id,
                     node_type="verify")
@@ -185,7 +251,7 @@ def _add_verify(graph: StateGraph, node: VerifyNode, first_end: str) -> None:
             return "end"
         return "mismatch"
 
-    graph.add_node(node.node_id, run)
+    graph.add_node(node.node_id, _with_visit_limit(flow, node.node_id, run))
     graph.add_conditional_edges(
         node.node_id,
         route,

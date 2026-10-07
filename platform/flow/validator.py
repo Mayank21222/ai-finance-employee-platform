@@ -41,6 +41,10 @@ def validate(flow: Flow) -> list[str]:
         )
     if not any(isinstance(n, EndNode) for n in flow.nodes):
         errors.append("The flow needs at least one end node.")
+    if flow.max_visits_per_node < 1:
+        errors.append("max_visits_per_node must be at least 1.")
+    if flow.max_total_visits < 1:
+        errors.append("max_total_visits must be at least 1.")
 
     for node in flow.nodes:
         for target in Flow.next_ids(node):

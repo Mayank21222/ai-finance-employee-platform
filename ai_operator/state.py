@@ -49,6 +49,8 @@ class AgentState(TypedDict, total=False):
     model_parse_failures: int
     variables: dict[str, Any]
     """Mutable session variables (the writable half of run memory)."""
+    node_visits: dict[str, int]
+    """How many times each flow node has been entered (visit limits)."""
 
 
 INITIAL_STATE_KEYS: dict[str, Any] = {
@@ -67,4 +69,5 @@ INITIAL_STATE_KEYS: dict[str, Any] = {
     "human_message": None,
     "model_parse_failures": 0,
     "variables": {},
+    "node_visits": {},
 }
