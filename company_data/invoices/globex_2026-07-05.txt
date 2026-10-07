@@ -1,0 +1,6 @@
+Vendor: Globex Logistics
+Invoice Number: GLX-8841
+Invoice Date: 2026-07-05
+Amount: INR 15,750.00
+Due Date: 2026-08-04
+Description: Freight forwarding, July

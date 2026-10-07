@@ -1,0 +1,17 @@
+{
+  "vendors": {
+    "Acme Corp": {
+      "contact": "ap@acme.example",
+      "payment_terms": "net 10"
+    },
+    "Globex Logistics": {
+      "contact": "billing@globex.example",
+      "payment_terms": "net 30"
+    },
+    "Initech Consulting": {
+      "contact": "invoices@initech.example",
+      "payment_terms": "net 30"
+    }
+  },
+  "notes": []
+}

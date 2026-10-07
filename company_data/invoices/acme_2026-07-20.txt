@@ -1,0 +1,6 @@
+Vendor: Acme Corp
+Invoice Number: ACME-2026-079
+Invoice Date: 2026-07-20
+Amount: INR 42,500.00
+Due Date: 2026-07-30
+Description: Custom fixture build, July batch
