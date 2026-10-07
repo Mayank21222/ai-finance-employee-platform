@@ -18,6 +18,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ai_operator.nodes import ask, decide, execute, finish, understand, verify_node
 from ai_operator.state import AgentState
+from ai_operator.tools import browser as browser_tools
 from ai_operator.tracing import trace_event
 from ai_operator.variables import write_variable
 from platform.flow.models import (
@@ -111,11 +112,13 @@ def _add_agent(
 
     def entry(state: AgentState) -> dict:
         trace_event(state["run_id"], "node_entered", node=nid, node_type="agent")
+        _pin(state, nid)
         updates = understand.run_understand(state, client)
         trace_event(state["run_id"], "node_exited", node=nid)
         return updates
 
     def decide_node(state: AgentState) -> dict:
+        browser_tools.pin_agent(nid)  # idempotent; re-pins after a resume
         updates = decide.run_decide(
             state, client,
             agent_system=persona,
@@ -130,15 +133,23 @@ def _add_agent(
         return updates
 
     def execute_node(state: AgentState, config: RunnableConfig) -> dict:
+        browser_tools.pin_agent(nid)
         return execute.run_execute(state, config, allowed_tools=allowed_tools)
 
+    def ask_node(state: AgentState) -> dict:
+        browser_tools.pin_agent(nid)
+        return ask.run_ask(state)
+
     def route_after_entry(state: AgentState) -> str:
-        return "decide" if state.get("status") == "running" else "fallback"
+        if state.get("status") != "running":
+            _release(state, nid)
+            return "fallback"
+        return "decide"
 
     graph.add_node(nid, _with_visit_limit(flow, nid, entry))
     graph.add_node(f"{nid}/decide", decide_node)
     graph.add_node(f"{nid}/execute", execute_node)
-    graph.add_node(f"{nid}/ask", ask.run_ask)
+    graph.add_node(f"{nid}/ask", ask_node)
     graph.add_conditional_edges(
         nid,
         route_after_entry,
@@ -161,15 +172,29 @@ def _add_agent(
     graph.add_edge(f"{nid}/ask", f"{nid}/decide")
 
 
+def _pin(state: AgentState, nid: str) -> None:
+    """Phase 3: this agent node owns a browser worker while it executes."""
+    idx = browser_tools.pin_agent(nid)
+    if idx is not None:
+        trace_event(state["run_id"], "browser_pinned", node=nid, worker=idx)
+
+
+def _release(state: AgentState, nid: str) -> None:
+    browser_tools.release_agent(nid)
+    trace_event(state["run_id"], "browser_released", node=nid)
+
+
 def _agent_router(node: AgentNode):
     """Route one decide step of an agent: stay in the loop or leave the node.
 
     Leaving prefers node.routes[save_as value] (Phase-3 variable routing, so
     a classifier picks its specialist) and falls back to the primary next.
+    Every leave releases the agent's browser worker; execute/ask keep it.
     """
 
     def route(state: AgentState) -> str:
         if state.get("status") != "running":
+            _release(state, node.node_id)
             return "fallback"
         decision = state.get("last_decision") or {}
         action = decision.get("action_type")
@@ -177,16 +202,21 @@ def _agent_router(node: AgentNode):
             return "execute"
         if action == "ask_human":
             return "ask"
+        target = "next"
         if node.routes and node.save_as:
             value = str(
                 (state.get("variables") or {}).get(node.save_as, "")
             ).strip()
             if value in node.routes:
-                return f"route:{value}"
-            if value.lower() in {k.lower() for k in node.routes}:
-                hit = next(k for k in node.routes if k.lower() == value.lower())
-                return f"route:{hit}"
-        return "next"
+                target = f"route:{value}"
+            else:
+                hit = next(
+                    (k for k in node.routes if k.lower() == value.lower()), None
+                )
+                if hit is not None:
+                    target = f"route:{hit}"
+        _release(state, node.node_id)
+        return target
 
     return route
 

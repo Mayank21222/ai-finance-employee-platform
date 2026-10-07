@@ -5,10 +5,16 @@ owns its browser on its own thread; every tool call is a queue request waited
 on with a timeout. On timeout the caller gets a TimeoutError while the worker
 stays alive for later calls.
 
-Routing is sticky per calling thread: a run's ops all land on the same worker
-so page state stays coherent, while other threads use the second browser
-instead of queueing behind a busy one. The pool exposes the same call
-interface as a single worker, so no tool code changed.
+Phase 3 routing is node-id sticky: at agent entry the compiler pins the
+current agent node to one worker (pin_agent), and every tool call while that
+agent runs lands on that worker - regardless of which internal thread made
+the call. At agent exit the claim is released back to the pool
+(release_agent), so the next agent gets a different worker when one is free
+and page states cannot mix between agents. Calls made with no active agent
+(e.g. the verifier's evidence screenshot) fall back to the last released
+worker, then to per-thread stickiness, so evidence keeps showing the page the
+run just worked on. The pool exposes the same call interface as a single
+worker, so no tool code changed.
 """
 
 from __future__ import annotations
@@ -220,17 +226,23 @@ def _page_snapshot(page: Any) -> str:
 
 
 class _BrowserPool:
-    """Sticky pool of browser workers with the single-worker call interface.
+    """Pool of browser workers with node-id stickiness (Phase 3).
 
-    Each calling thread is pinned to one worker, so a run's op sequence acts
-    on one coherent page. Threads that have not spoken yet prefer an idle
-    worker, so a second concurrent run gets the other browser instead of
-    waiting behind a busy one.
+    pin_agent(agent_id) claims one worker for an agent node for the whole
+    duration of that node; tool calls route by the active agent id, which is
+    process-level state - one run runs at a time - so calls from any thread
+    hit the pinned page. release_agent gives the claim back to the pool (the
+    next agent prefers a different worker so pages never mix). With no active
+    agent, calls use the last released worker (evidence continuity), then the
+    old per-thread stickiness.
     """
 
     def __init__(self, size: int = POOL_SIZE) -> None:
         self._workers = [_BrowserWorker(i) for i in range(size)]
         self._sticky: dict[int, int] = {}
+        self._agent_pins: dict[str, int] = {}
+        self._active_agent: str | None = None
+        self._default_worker: int | None = None
         self._rr = 0
         self._lock = threading.Lock()
         self.evidence_dir: Path = Path("runs")
@@ -240,16 +252,73 @@ class _BrowserPool:
     def is_running(self) -> bool:
         return any(w.is_running for w in self._workers)
 
+    @property
+    def active_agent(self) -> str | None:
+        return self._active_agent
+
     def start(self) -> None:
         for w in self._workers:
             w.start()
 
-    def _route(self) -> int:
-        tid = threading.get_ident()
-        idx = self._sticky.get(tid)
-        if idx is not None:
-            return idx
+    def pin_agent(self, agent_id: str) -> int:
+        """Assign this agent node a worker; idempotent while it stays active."""
         with self._lock:
+            if (self._active_agent == agent_id
+                    and agent_id in self._agent_pins):
+                return self._agent_pins[agent_id]
+            prev = self._active_agent
+            if prev is not None and prev != agent_id:
+                # Previous agent exited without an explicit release.
+                idx = self._agent_pins.pop(prev, None)
+                if idx is not None:
+                    self._default_worker = idx
+            idx = self._agent_pins.get(agent_id)
+            if idx is None:
+                claimed = set(self._agent_pins.values())
+                free = [w.index for w in self._workers
+                        if w.index not in claimed]
+                if not free:
+                    # More live agents than workers: they must share a page.
+                    idx = self._rr % len(self._workers)
+                    self._rr += 1
+                elif self._default_worker in free and len(free) > 1:
+                    # Give the new agent a fresh page; keep the last one for
+                    # late evidence captures.
+                    free.remove(self._default_worker)
+                    idx = free[0]
+                elif self._default_worker in free:
+                    idx = free[0]
+                else:
+                    idle_free = [i for i in free if self._workers[i].idle]
+                    idx = idle_free[0] if idle_free else free[0]
+                self._agent_pins[agent_id] = idx
+            self._active_agent = agent_id
+            return idx
+
+    def release_agent(self, agent_id: str) -> None:
+        """Give the agent's worker back to the pool (kept as last-used)."""
+        with self._lock:
+            idx = self._agent_pins.pop(agent_id, None)
+            if idx is not None:
+                self._default_worker = idx
+            if self._active_agent == agent_id:
+                self._active_agent = None
+
+    def _route(self) -> int:
+        with self._lock:
+            agent = self._active_agent
+            if agent is not None:
+                idx = self._agent_pins.get(agent)
+                if idx is not None:
+                    return idx
+            if self._default_worker is not None:
+                # No active agent (verifier evidence, between nodes): show
+                # the page the run just worked on.
+                return self._default_worker
+            tid = threading.get_ident()
+            idx = self._sticky.get(tid)
+            if idx is not None:
+                return idx
             # drop claims from threads that have exited (ids may be reused,
             # which is harmless: the new owner navigates first anyway)
             live = {t.ident for t in threading.enumerate()}
@@ -267,7 +336,7 @@ class _BrowserPool:
                 idx = self._rr % len(self._workers)
                 self._rr += 1
             self._sticky[tid] = idx
-        return idx
+            return idx
 
     def call(self, op: str, args: dict[str, Any], timeout: float) -> Any:
         worker = self._workers[self._route()]
@@ -280,10 +349,26 @@ class _BrowserPool:
         for w in self._workers:
             if w.is_running:
                 last = w.stop()
+        with self._lock:
+            # Fresh run starts clean: no stale pins or default worker.
+            self._agent_pins.clear()
+            self._active_agent = None
+            self._default_worker = None
+            self._sticky.clear()
         return last
 
 
 WORKER = _BrowserPool()
+
+
+def pin_agent(agent_id: str) -> int:
+    """Phase 3: pin the current agent node to one pool worker."""
+    return WORKER.pin_agent(agent_id)
+
+
+def release_agent(agent_id: str) -> None:
+    """Phase 3: release the agent node's worker back to the pool."""
+    WORKER.release_agent(agent_id)
 
 
 @tool("navigate", "Open a URL in the browser.", PermissionLevel.reversible_write, NavigateArgs)
