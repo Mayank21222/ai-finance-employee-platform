@@ -11,6 +11,11 @@ from ai_operator.state import AgentState, Decision
 from ai_operator.tools.registry import describe_for_prompt
 from ai_operator.tracing import trace_event
 
+# Design decision (history window): history lines are NEVER dropped - every
+# entry stays in the prompt. Only each entry's detail is compressed to a
+# single line (whitespace collapsed) and capped at HISTORY_DETAIL_CHARS, so
+# context stays bounded without losing the record of what was done. Truncating
+# lines instead made the agent forget completed actions and restart cycles.
 HISTORY_DETAIL_CHARS = 220
 
 
