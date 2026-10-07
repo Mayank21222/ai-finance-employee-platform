@@ -26,7 +26,7 @@ def _popup() -> str:
 z-index:10;display:flex;align-items:center;justify-content:center">
 <div id="popup-box" style="background:#fff;padding:1.5rem;border-radius:8px;max-width:20rem">
 <p>Unsaved changes will be lost.</p>
-<button id="close-popup">Continue</button></div></div>"""
+<button id="close-popup" onclick="document.getElementById('popup-overlay').style.display='none'">Continue</button></div></div>"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -69,8 +69,16 @@ def add_form(request: Request) -> str:
 
 
 @app.post("/invoices")
-def create_invoice(vendor: str = Form(...), amount: str = Form(...), due_date: str = Form(...)):
+def create_invoice(
+    vendor: str = Form(...),
+    amount: str = Form(...),
+    due_date: str = Form(default=""),
+    due_date_renamed: str = Form(default="", alias="due-date-field"),
+):
     failures.maybe_slow()
+    due = (due_date or due_date_renamed).strip()
+    if not due:
+        return RedirectResponse("/add?error=Due date is required", status_code=303)
     cleaned = amount.strip().replace(",", "").replace("₹", "").replace("INR", "").strip()
     if failures.is_on("validation") and cleaned != amount.strip():
         return RedirectResponse(
@@ -85,7 +93,7 @@ def create_invoice(vendor: str = Form(...), amount: str = Form(...), due_date: s
         )
     if value <= 0:
         return RedirectResponse("/add?error=Amount must be greater than zero", status_code=303)
-    invoice_id = db.add_invoice(vendor.strip(), value, due_date.strip())
+    invoice_id = db.add_invoice(vendor.strip(), value, due)
     return RedirectResponse(f"/?saved={invoice_id}", status_code=303)
 
 

@@ -109,7 +109,18 @@ class StubClient:
         # Result-aware parsing: only count completed ACTIONS, never output text.
         called = re.findall(r"^\s*\d+\.\s+(\w+)\(", history, flags=re.M)
         read_paths = re.findall(r"read_file\(path=['\"]?([\w./-]+)", history)
-        filled = re.findall(r"fill\(selector=['\"]?([\w#-]+)['\"]?[^)]*\)\s*->\s*ok", history)
+        submit_tries = re.findall(r"submit_form\([^)]*\)\s*->\s*(ok|ERROR): (.+)", history)
+        last_submit = submit_tries[-1] if submit_tries else None
+        submit_ok = bool(last_submit and last_submit[0] == "ok" and "?saved=" in last_submit[1])
+        validation_seen = bool(
+            last_submit and last_submit[0] == "ok" and "error=Amount" in last_submit[1]
+        )
+        last_submit_idx = history.rfind("submit_form(")
+        last_read_idx = history.rfind("read_page(")
+        # An error redirect re-renders an empty form: only fills recorded AFTER
+        # the last submit are still valid on the current page.
+        segment = history[last_submit_idx:] if last_submit_idx != -1 else history
+        filled = re.findall(r"fill\(selector=['\"]?([\w#-]+)['\"]?[^)]*\)\s*->\s*ok", segment)
 
         if not called:
             return self._tool("search_files", {"query": "Acme Corp", "path": "company_data"},
@@ -129,23 +140,35 @@ class StubClient:
         if "navigate" not in called:
             return self._tool("navigate", {"url": "http://127.0.0.1:8000/add"},
                               "Open the add-invoice page.")
-        if "read_page" not in called:
-            return self._tool("read_page", {}, "Inspect the page's actual inputs.")
-        if "#vendor" not in filled:
-            return self._tool("fill", {"selector": "#vendor", "value": "Acme Corp"},
-                              "Fill the vendor field.")
-        if "#amount" not in filled:
-            return self._tool("fill", {"selector": "#amount", "value": "42500.00"},
-                              "Fill the amount from the latest invoice.")
-        if "#due_date" not in filled and "#due-date-field" not in filled:
-            if "due-date-field" in observation:
-                sel = "#due-date-field"
-                thought = "The page renamed the due-date field; fill the selector that exists."
-            else:
-                sel = "#due_date"
-                thought = "Fill the due date from the latest invoice."
-            return self._tool("fill", {"selector": sel, "value": "2026-07-30"}, thought)
-        if not any(c.startswith("submit") for c in called):
+        if last_read_idx == -1 or (last_submit_idx != -1 and last_read_idx < last_submit_idx):
+            return self._tool("read_page", {},
+                              "Inspect the page again; the last submit may have changed it.")
+        popup_hint = any(
+            h in observation for h in ("Unsaved changes", "popup-overlay", "intercepts pointer")
+        )
+        if popup_hint:
+            return self._tool("click", {"selector": "#close-popup"},
+                              "An overlay popup blocks the form; close it first.")
+        if not submit_ok:
+            if "#vendor" not in filled:
+                return self._tool("fill", {"selector": "#vendor", "value": "Acme Corp"},
+                                  "Fill the vendor field.")
+            if "#amount" not in filled:
+                if validation_seen:
+                    return self._tool(
+                        "fill", {"selector": "#amount", "value": "42500.00"},
+                        "The form rejected the comma-formatted amount; resend as a plain number.",
+                    )
+                return self._tool("fill", {"selector": "#amount", "value": "42,500.00"},
+                                  "Fill the amount exactly as the invoice file writes it.")
+            if "#due_date" not in filled and "#due-date-field" not in filled:
+                if "due-date-field" in observation:
+                    sel = "#due-date-field"
+                    thought = "The page renamed the due-date field; fill the selector that exists."
+                else:
+                    sel = "#due_date"
+                    thought = "Fill the due date from the latest invoice."
+                return self._tool("fill", {"selector": sel, "value": "2026-07-30"}, thought)
             return self._tool("submit_form", {"selector": "form"},
                               "Submit the form to create the record.")
         if "verify()" not in history:

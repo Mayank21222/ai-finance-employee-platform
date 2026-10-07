@@ -130,13 +130,31 @@ class _BrowserWorker:
             target = selector
             if selector == "form":
                 target = "form button[type='submit'], form input[type='submit']"
+            # Fail fast with a useful message instead of blocking for the full timeout.
+            button = page.locator(target).first
             try:
-                page.click(target)
+                button.wait_for(state="visible", timeout=4000)
             except Exception as exc:  # noqa: BLE001
-                page.locator(selector).first.evaluate("el => el.requestSubmit()")
+                inputs = _input_ids(page)
+                raise RuntimeError(
+                    f"submit control {target!r} not found on {page.url}; "
+                    f"inputs present: {inputs}; original error: {exc}"
+                ) from exc
+            url_before = page.url
+            nav_error = None
             try:
-                page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
-            except Exception:  # noqa: BLE001 - navigation may already be done
+                with page.expect_navigation(wait_until="load", timeout=4000):
+                    button.click()
+            except Exception as exc:  # noqa: BLE001 - may still have navigated
+                nav_error = exc
+            if page.url == url_before:
+                detail = str(nav_error) if nav_error else "click completed without navigation"
+                raise RuntimeError(
+                    f"submit click failed: {detail}; page stayed at {page.url}"
+                )
+            try:
+                page.wait_for_load_state("networkidle", timeout=4000)
+            except Exception:  # noqa: BLE001 - redirect chain already settled
                 pass
             return f"submitted via {target}; now at {page.url}"
         if op == "screenshot":
