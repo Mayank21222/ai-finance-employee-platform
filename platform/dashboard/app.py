@@ -1191,14 +1191,19 @@ def models_delete_field(request: Request, name: str, field: str):
 
 def _connectors_error(errors: list[str]) -> Response:
     return HTMLResponse(
-        html.connectors_page(db.list_connectors(), error="; ".join(errors)),
+        html.connectors_page(db.list_connectors(), error="; ".join(errors),
+                             sources=db.list_data_sources(),
+                             queries=db.list_saved_queries(),
+                             mode="configure"),
         status_code=400,
     )
 
 
 @app.get("/connectors", response_class=HTMLResponse, include_in_schema=False)
 def connectors_page(request: Request) -> str:
-    return html.connectors_page(db.list_connectors(), mode=_mode(request))
+    return html.connectors_page(db.list_connectors(), mode=_mode(request),
+                                sources=db.list_data_sources(),
+                                queries=db.list_saved_queries())
 
 
 @app.post("/connectors", include_in_schema=False)
@@ -1292,6 +1297,110 @@ def connectors_delete_endpoint(connector_id: int, endpoint_name: str):
     db.delete_endpoint(connector_id, endpoint_name)
     flowcfg.publish_connectors()
     return RedirectResponse("/connectors", status_code=303)
+
+
+# --- data sources and saved queries (Phase 6 section 9) ---------------------
+
+
+def _query_name_errors(name: str) -> list[str]:
+    errors: list[str] = []
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        errors.append("Tool name must be letters, digits or underscores.")
+        return errors
+    from ai_operator.tools import datasources
+    from ai_operator.tools.registry import names as registry_names
+
+    taken = set(registry_names()) | {q["name"]
+                                     for q in db.list_saved_queries()}
+    if name in taken:
+        errors.append(f"A tool named '{name}' already exists.")
+    if name in datasources.tool_names():
+        errors.append(f"'{name}' is already a saved query.")
+    return errors
+
+
+@app.post("/connectors/sources", include_in_schema=False)
+def datasources_create(name: str = Form(...), type: str = Form(...),
+                       path: str = Form(...)):
+    name, path = name.strip(), path.strip()
+    errors: list[str] = []
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        errors.append("Source name must be letters, digits or underscores.")
+    if any(s["name"] == name for s in db.list_data_sources()):
+        errors.append(f"Data source '{name}' already exists.")
+    if type not in ("csv", "sqlite"):
+        errors.append("Type must be csv or sqlite.")
+    if not path:
+        errors.append("Path is required.")
+    if errors:
+        return _connectors_error(errors)
+    source_id = db.add_data_source(name, type, path)
+    publish_errors = flowcfg.publish_datasources()
+    if publish_errors:
+        db.delete_data_source(source_id)
+        return _connectors_error(publish_errors)
+    return RedirectResponse("/connectors", status_code=303)
+
+
+@app.post("/connectors/sources/{source_id}/delete", include_in_schema=False)
+def datasources_delete(source_id: int):
+    if db.get_data_source(source_id) is None:
+        return Response(status_code=404)
+    db.delete_data_source(source_id)
+    flowcfg.publish_datasources()
+    return RedirectResponse("/connectors", status_code=303)
+
+
+@app.post("/connectors/queries", include_in_schema=False)
+def datasources_add_query(source_id: int = Form(...),
+                          name: str = Form(...), sql: str = Form(...)):
+    name, sql = name.strip(), sql.strip()
+    if db.get_data_source(source_id) is None:
+        return _connectors_error(["Pick an existing data source."])
+    errors = _query_name_errors(name)
+    if not sql:
+        errors.append("SQL is required.")
+    if errors:
+        return _connectors_error(errors)
+    query_id = db.add_saved_query(source_id, name, sql)
+    publish_errors = flowcfg.publish_datasources()
+    if publish_errors:  # rollback: never persist a query that cannot publish
+        db.delete_saved_query(query_id)
+        return _connectors_error(publish_errors)
+    return RedirectResponse("/connectors", status_code=303)
+
+
+@app.post("/connectors/queries/{query_id}/delete", include_in_schema=False)
+def datasources_delete_query(query_id: int):
+    if db.get_saved_query(query_id) is None:
+        return Response(status_code=404)
+    db.delete_saved_query(query_id)
+    flowcfg.publish_datasources()
+    return RedirectResponse("/connectors", status_code=303)
+
+
+# --- tenant export (Phase 6 section 9) --------------------------------------
+
+
+@app.get("/export/{tenant}", include_in_schema=False)
+def export_tenant(tenant: str):
+    """Download the no-lock-in zip: flow, versions, skills, models, roles,
+    redacted connectors, sessions, runs, traces and evidence."""
+    from platform.dashboard import exporter
+
+    try:
+        data = exporter.export_zip(tenant)
+    except ValueError as exc:
+        return HTMLResponse(
+            html.page("Export",
+                      f'<h1 class="err">{html.esc(exc)}</h1>'
+                      '<p><a href="/sessions">Back to sessions</a></p>',
+                      active="sessions"),
+            status_code=404)
+    return Response(
+        content=data, media_type="application/zip",
+        headers={"Content-Disposition":
+                 f'attachment; filename="comp_ops_{tenant}_export.zip"'})
 
 
 # --- audit trail (Phase 4) --------------------------------------------------

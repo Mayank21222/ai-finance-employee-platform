@@ -91,4 +91,29 @@ def publish_connectors() -> list[str]:
     errors = mirror_db_connectors()
     if not errors:
         errors = sync_registry()
+    # Phase 6 section 9: saved data-source queries ride the same publish
+    # path so startup and page mutations keep them registered too.
+    if not errors:
+        errors = publish_datasources()
     return errors
+
+
+def publish_datasources() -> list[str]:
+    """Saved queries (DB) -> read tools in the registry (Phase 6 section 9)."""
+    try:
+        from ai_operator.tools import datasources
+
+        rows = []
+        for q in db.list_saved_queries():
+            rows.append({
+                "name": q["name"],
+                "sql": q["sql"],
+                "source": {
+                    "name": q.get("source_name") or "",
+                    "type": q.get("source_type") or "",
+                    "path": q.get("source_path") or "",
+                },
+            })
+        return datasources.sync(rows)
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        return [f"data sources: {exc}"]

@@ -206,6 +206,21 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS data_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS saved_queries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL REFERENCES data_sources(id)
+                    ON DELETE CASCADE,
+                name TEXT NOT NULL UNIQUE,
+                sql TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -936,3 +951,227 @@ def set_setting(key: str, value: str) -> None:
     with connect() as con:
         con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                     (key, value))
+
+
+# --- Phase 6 section 9: read-only data sources and saved queries ------------
+
+def list_data_sources() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM data_sources ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_data_source(source_id: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM data_sources WHERE id = ?",
+                          (int(source_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def add_data_source(name: str, type: str, path: str) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO data_sources (name, type, path, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (name, type, path, time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def delete_data_source(source_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM saved_queries WHERE source_id = ?",
+                    (int(source_id),))
+        con.execute("DELETE FROM data_sources WHERE id = ?",
+                    (int(source_id),))
+
+
+def list_saved_queries() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT q.*, s.name AS source_name, s.type AS source_type, "
+            "s.path AS source_path FROM saved_queries q "
+            "LEFT JOIN data_sources s ON s.id = q.source_id "
+            "ORDER BY q.id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_saved_query(query_id: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM saved_queries WHERE id = ?",
+                          (int(query_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def add_saved_query(source_id: int, name: str, sql: str) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO saved_queries (source_id, name, sql, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (int(source_id), name, sql, time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def delete_saved_query(query_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM saved_queries WHERE id = ?",
+                    (int(query_id),))
+
+
+# --- Phase 6 section 9: restore helpers (fin import / dashboard import) -----
+
+def import_sessions(rows: list[dict[str, Any]]) -> None:
+    with connect() as con:
+        for s in rows:
+            con.execute(
+                "INSERT OR REPLACE INTO sessions (id, tenant, currency, "
+                "approval_threshold, user_role, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (int(s["id"]), s["tenant"], s["currency"],
+                 float(s["approval_threshold"]), s["user_role"],
+                 float(s.get("created_at") or time.time())))
+
+
+def import_runs(rows: list[dict[str, Any]]) -> None:
+    with connect() as con:
+        for r in rows:
+            con.execute(
+                "INSERT OR REPLACE INTO runs (run_id, session_id, task, "
+                "status, error, created_at, finished_at, state, source, "
+                "agent_versions_used, skipped_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(r["run_id"]), r.get("session_id"), r.get("task"),
+                 r.get("status") or "running", r.get("error"),
+                 float(r.get("created_at") or time.time()),
+                 r.get("finished_at"), r.get("state") or "interrupted",
+                 r.get("source") or "manual",
+                 r.get("agent_versions_used"), r.get("skipped_reason")))
+
+
+def import_roles(role_rows: list[dict[str, Any]],
+                 permission_rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Upsert roles by NAME and re-point permissions at the live ids."""
+    ids: dict[str, int] = {}
+    with connect() as con:
+        for r in role_rows:
+            name = str(r.get("name") or "").strip()
+            if not name:
+                continue
+            existing = con.execute(
+                "SELECT id FROM roles WHERE name = ?", (name,)).fetchone()
+            if existing:
+                con.execute("UPDATE roles SET description = ? WHERE id = ?",
+                            (str(r.get("description") or ""),
+                             int(existing["id"])))
+                ids[name] = int(existing["id"])
+            else:
+                cur = con.execute(
+                    "INSERT INTO roles (name, description, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (name, str(r.get("description") or ""), time.time()))
+                ids[name] = int(cur.lastrowid)
+        for p in permission_rows:
+            role_id = ids.get(str(p.get("role") or ""))
+            if role_id is None:
+                continue
+            _set_role_permission(con, role_id, str(p.get("resource") or ""),
+                                 str(p.get("access") or "none"),
+                                 p.get("approve_limit_amount"))
+    return ids
+
+
+def _set_role_permission(con: sqlite3.Connection, role_id: int,
+                         resource: str, access: str,
+                         limit: float | None) -> None:
+    row = con.execute(
+        "SELECT id FROM role_permissions WHERE role_id = ? AND resource = ?",
+        (role_id, resource)).fetchone()
+    if row:
+        con.execute("UPDATE role_permissions SET access = ?, "
+                    "approve_limit_amount = ? WHERE id = ?",
+                    (access, limit, row["id"]))
+    else:
+        con.execute(
+            "INSERT INTO role_permissions (role_id, resource, access, "
+            "approve_limit_amount) VALUES (?, ?, ?, ?)",
+            (role_id, resource, access, limit))
+
+
+def import_skills(rows: list[dict[str, Any]]) -> None:
+    with connect() as con:
+        for s in rows:
+            if not s.get("name"):
+                continue
+            con.execute(
+                "INSERT OR REPLACE INTO skills (id, name, description, "
+                "body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(s["id"]) if s.get("id") else None, s["name"],
+                 s.get("description") or "", s.get("body") or "",
+                 float(s.get("created_at") or time.time())))
+
+
+def import_versions(rows: list[dict[str, Any]]) -> None:
+    with connect() as con:
+        for v in rows:
+            con.execute(
+                "INSERT OR REPLACE INTO agent_versions (id, node_id, "
+                "version, config, label, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (int(v["id"]) if v.get("id") else None,
+                 v["node_id"], int(v["version"]),
+                 v["config"] if isinstance(v["config"], str)
+                 else json.dumps(v["config"]),
+                 v.get("label") or "",
+                 float(v.get("created_at") or time.time())))
+
+
+def import_connectors(rows: list[dict[str, Any]]) -> None:
+    with connect() as con:
+        for c in rows:
+            if not c.get("name"):
+                continue
+            con.execute(
+                "INSERT OR REPLACE INTO connectors (id, name, base_url, "
+                "headers, endpoints, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (int(c["id"]) if c.get("id") else None, c["name"],
+                 c.get("base_url") or "",
+                 json.dumps(c.get("headers") or {}),
+                 json.dumps(c.get("endpoints") or []), time.time()))
+
+
+def import_data_sources(sources: list[dict[str, Any]],
+                        queries: list[dict[str, Any]]) -> None:
+    """Restore sources first; queries map onto the restored source ids."""
+    id_map: dict[int, int] = {}
+    with connect() as con:
+        for s in sources:
+            if not s.get("name"):
+                continue
+            old_id = int(s["id"]) if s.get("id") else None
+            row = con.execute(
+                "SELECT id FROM data_sources WHERE name = ?",
+                (s["name"],)).fetchone()
+            if row:
+                con.execute("UPDATE data_sources SET type = ?, path = ? "
+                            "WHERE id = ?",
+                            (s.get("type") or "csv", s.get("path") or "",
+                             int(row["id"])))
+                new_id = int(row["id"])
+            else:
+                cur = con.execute(
+                    "INSERT INTO data_sources (name, type, path, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (s["name"], s.get("type") or "csv",
+                     s.get("path") or "", time.time()))
+                new_id = int(cur.lastrowid)
+            if old_id is not None:
+                id_map[old_id] = new_id
+        for q in queries:
+            source_id = id_map.get(int(q.get("source_id") or -1))
+            if source_id is None or not q.get("name"):
+                continue
+            con.execute(
+                "INSERT OR REPLACE INTO saved_queries (id, source_id, name, "
+                "sql, created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(q["id"]) if q.get("id") else None, source_id,
+                 q["name"], q.get("sql") or "", time.time()))

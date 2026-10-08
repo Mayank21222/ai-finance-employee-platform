@@ -113,6 +113,21 @@ def validate(flow: Flow) -> ValidationResult:
 
     registered = set(names())
     connector_names = {conn.name for conn in flow.connectors}
+    # Phase 6 section 9: saved data-source queries are registered as read
+    # tools. Accept them before registration too (validate-before-register),
+    # the same way connector names are accepted from the config itself.
+    try:
+        from ai_operator.tools import datasources
+
+        registered |= datasources.tool_names()
+    except Exception:
+        pass
+    try:
+        from platform.dashboard import db as _db
+
+        registered |= {str(q["name"]) for q in _db.list_saved_queries()}
+    except Exception:
+        pass
     for node in flow.nodes:
         if isinstance(node, AgentNode):
             if not node.next_node_ids and not node.fallback_next:

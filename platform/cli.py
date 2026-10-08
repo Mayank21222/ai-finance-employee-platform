@@ -17,9 +17,11 @@ Exit codes: 0 = success/valid/verified_complete, 1 = errors/failed run.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -151,6 +153,55 @@ def cmd_flow_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """Phase 6 section 9: pack a tenant into a zip (secrets redacted)."""
+    db = _dashboard()
+    from platform.dashboard import exporter
+
+    try:
+        data = exporter.export_zip(args.tenant)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    target = Path(args.output or f"comp_ops_{args.tenant}_export.zip")
+    target.write_bytes(data)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        manifest = json.loads(z.read("manifest.json"))
+        names = z.namelist()
+    counts = manifest.get("counts") or {}
+    print(f"wrote {target} ({len(data)} bytes, {len(names)} entries)")
+    for key in ("sessions", "runs", "roles", "skills", "agent_versions",
+                "trace_files"):
+        if key in counts:
+            print(f"  {key}: {counts[key]}")
+    print(f"  redacted: {manifest.get('connectors_redacted')}")
+    print(f"  omitted:  {', '.join(manifest.get('omitted') or [])}")
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Phase 6 section 9: restore an export into an empty database."""
+    db = _dashboard()
+    from platform.dashboard import exporter
+
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"ERROR: no such file: {path}")
+        return 1
+    try:
+        summary = exporter.import_zip(path.read_bytes())
+    except ValueError as exc:
+        print(f"REFUSED: {exc}")
+        return 1
+    except zipfile.BadZipFile:
+        print(f"REFUSED: {path} is not a zip archive")
+        return 1
+    print(f"restored {path} into {db.db_path()}")
+    for key, value in summary.items():
+        print(f"  {key}: {value}")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     db = _dashboard()
     from platform.dashboard import runner
@@ -247,6 +298,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", type=int, required=True)
     p.add_argument("task")
 
+    p = sub.add_parser("export",
+                       help="export a tenant to a zip (no lock-in; "
+                            "secrets redacted)")
+    p.add_argument("--tenant", required=True)
+    p.add_argument("-o", "--output", default=None)
+
+    p = sub.add_parser("import",
+                       help="restore a tenant export into an empty database")
+    p.add_argument("file")
+
     runs = sub.add_parser("runs", help="run history")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
     runs_sub.add_parser("list", help="list recent runs")
@@ -262,6 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
 _HANDLERS = {
     "init": cmd_init,
     "run": cmd_run,
+    "export": cmd_export,
+    "import": cmd_import,
 }
 
 

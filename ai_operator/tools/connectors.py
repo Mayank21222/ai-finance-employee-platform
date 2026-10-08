@@ -55,6 +55,17 @@ def set_http_client(client: httpx.Client | None) -> None:
     _injected_client = client
 
 
+def get_runtime() -> tuple[dict[str, Any], dict[str, Any]]:
+    """The current step's (variables, session) snapshot.
+
+    Phase 6 section 9: data-source query tools render their {{vars.*}} /
+    {{session.*}} parameters from the same snapshot the execute node sets
+    here, so both tool families see identical values without a second
+    runtime path.
+    """
+    return dict(_variables), dict(_session)
+
+
 def _client_for() -> httpx.Client:
     global _default_client
     if _injected_client is not None:

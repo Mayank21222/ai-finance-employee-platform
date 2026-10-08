@@ -211,9 +211,24 @@ def sessions_page(sessions: list[dict], error: str = "",
 </form>
 <p class="dim">Runs are linked to a session by ID; the session supplies
 tenant, currency, approval threshold and user role (a real role from the
-Roles page) at start.</p>""",
+Roles page) at start.</p>
+<h2>Tenant export</h2>
+<p class="dim">Download everything for one tenant as a zip: flow config,
+agent versions, skills, data models, roles, connectors (secrets redacted),
+sessions, runs, traces and evidence. Restore it with
+<code>fin import &lt;file.zip&gt;</code> into an empty database.</p>
+<div class="row">{_tenant_export_links(sessions)}</div>""",
         active="sessions", mode=mode,
     )
+
+
+def _tenant_export_links(sessions: list[dict]) -> str:
+    tenants = sorted({str(s["tenant"]) for s in sessions})
+    if not tenants:
+        return '<span class="dim">No tenants yet.</span>'
+    return "".join(
+        f'<a href="/export/{esc(t)}"><button>Export {esc(t)} '
+        f'(zip)</button></a>' for t in tenants)
 
 
 def runs_page(runs: list[dict], sessions: list[dict],
@@ -1640,12 +1655,16 @@ the variable write path.</p>
 
 
 def connectors_page(connectors: list[dict], error: str = "",
-                    message: str = "", mode: str = "use") -> str:
+                    message: str = "", mode: str = "use",
+                    sources: list[dict] | None = None,
+                    queries: list[dict] | None = None) -> str:
     """Phase 4: the connector registry page.
 
     A connector is a base URL configured once; its endpoints become tools in
     the registry (toggleable per agent on the Agents page) and are projected
     into the flow config so the next run registers them.
+    Phase 6 section 9: also hosts read-only data sources (CSV/SQLite) and
+    their saved queries, each saved query registered as one read tool.
     """
     methods = ("GET", "POST", "PUT", "PATCH", "DELETE")
     levels = ("read", "reversible_write", "irreversible_write")
@@ -1717,9 +1736,79 @@ Agents page and is available to agents from the next run.</p>
          required style="flex:2">
   <input name="headers" placeholder='default headers JSON' value="&#123;&#125;">
   <button class="primary">Create connector</button>
-</form>""",
+</form>
+{_data_source_sections(sources or [], queries or [])}""",
         active="connectors", mode=mode,
     )
+
+
+def _data_source_sections(sources: list[dict], queries: list[dict]) -> str:
+    """Phase 6 section 9: read-only data sources + saved queries."""
+    src_rows = ""
+    for s in sources:
+        src_rows += (
+            f'<tr><td class="mono">{s["id"]}</td>'
+            f'<td><strong>{esc(s["name"])}</strong></td>'
+            f'<td><span class="badge">{esc(s["type"])}</span></td>'
+            f'<td class="mono">{esc(s["path"])}</td>'
+            f'<td><form method="post" '
+            f'action="/connectors/sources/{s["id"]}/delete" '
+            f'onsubmit="return confirm(\'Delete source and its queries?\')">'
+            f'<button>Delete</button></form></td></tr>')
+    if not src_rows:
+        src_rows = ('<tr><td colspan="5" class="dim">No data sources '
+                    'yet.</td></tr>')
+    q_rows = ""
+    for q in queries:
+        q_rows += (
+            f'<tr><td class="mono">{q["id"]}</td>'
+            f'<td class="mono"><strong>{esc(q["name"])}</strong></td>'
+            f'<td>{esc(q.get("source_name") or "-")} '
+            f'<span class="badge">{esc(q.get("source_type") or "")}</span></td>'
+            f'<td class="mono" style="white-space:pre-wrap">'
+            f'{esc((q.get("sql") or "")[:160])}</td>'
+            f'<td><form method="post" '
+            f'action="/connectors/queries/{q["id"]}/delete">'
+            f'<button>Delete</button></form></td></tr>')
+    if not q_rows:
+        q_rows = ('<tr><td colspan="5" class="dim">No saved queries '
+                  'yet.</td></tr>')
+    opts = "".join(
+        f'<option value="{s["id"]}">{esc(s["name"])}</option>'
+        for s in sources)
+    return f"""
+<h2>Data sources (read-only)</h2>
+<p class="dim">A CSV or SQLite file with named queries. Each saved query
+becomes one <strong>read</strong> tool in the registry (same role checks as
+every tool). The agent never supplies SQL: parameters come from
+<code>{{{{vars.x}}}}</code> placeholders, bound as values, and sources open
+read-only.</p>
+<table>
+<tr><th>ID</th><th>Name</th><th>Type</th><th>Path</th><th></th></tr>
+{src_rows}
+</table>
+<form method="post" action="/connectors/sources" class="row">
+  <input name="name" placeholder="name" required pattern="[A-Za-z0-9_]+">
+  <select name="type"><option value="csv">csv</option>
+    <option value="sqlite">sqlite</option></select>
+  <input name="path" placeholder="path to file (relative to repo root)"
+         required style="flex:3">
+  <button class="primary">Add data source</button>
+</form>
+<h2>Saved queries</h2>
+<table>
+<tr><th>ID</th><th>Tool name</th><th>Source</th><th>SQL</th><th></th></tr>
+{q_rows}
+</table>
+<form method="post" action="/connectors/queries" class="row">
+  <select name="source_id">{opts}</select>
+  <input name="name" placeholder="tool name" required
+         pattern="[A-Za-z0-9_]+">
+  <input name="sql"
+         placeholder="SELECT * FROM data WHERE vendor = {{{{vars.vendor}}}}"
+         required style="flex:3">
+  <button class="primary">Add saved query</button>
+</form>"""
 
 
 def schedules_page(schedules: list[dict], sessions: list[dict],
