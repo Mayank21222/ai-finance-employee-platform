@@ -129,7 +129,7 @@ def _add_agent(
     def entry(state: AgentState) -> dict:
         trace_event(state["run_id"], "node_entered", node=nid, node_type="agent")
         _pin(state, nid)
-        updates = understand.run_understand(state, client)
+        updates = understand.run_understand(state, client, agent_node=nid)
         trace_event(state["run_id"], "node_exited", node=nid)
         return updates
 
@@ -140,6 +140,7 @@ def _add_agent(
             agent_system=persona,
             agent_instructions=instructions,
             documents=documents,
+            agent_node=nid,
         )
         if node.save_as and state.get("status") == "running":
             decision = updates.get("last_decision") or {}

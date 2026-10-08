@@ -32,6 +32,7 @@ class OpenAICompatibleClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.last_usage: dict | None = None
 
     def complete(self, system: str, user: str) -> str:
         payload = {
@@ -47,7 +48,14 @@ class OpenAICompatibleClient:
                 f"{self.base_url}/chat/completions", headers=self.headers, json=payload
             )
             resp.raise_for_status()
-            return str(resp.json()["choices"][0]["message"]["content"])
+            body = resp.json()
+            usage = body.get("usage") or {}
+            self.last_usage = {
+                "model": self.model,
+                "input_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "output_tokens": int(usage.get("completion_tokens", 0) or 0),
+            }
+            return str(body["choices"][0]["message"]["content"])
 
 
 class AnthropicClient:
@@ -59,6 +67,7 @@ class AnthropicClient:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        self.last_usage: dict | None = None
 
     def complete(self, system: str, user: str) -> str:
         payload = {
@@ -72,7 +81,20 @@ class AnthropicClient:
                 "https://api.anthropic.com/v1/messages", headers=self.headers, json=payload
             )
             resp.raise_for_status()
-            return str(resp.json()["content"][0]["text"])
+            body = resp.json()
+            usage = body.get("usage") or {}
+            self.last_usage = {
+                "model": self.model,
+                "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            }
+            return str(body["content"][0]["text"])
+
+
+# Phase 5: the stub reports a fixed usage per call so offline demos and tests
+# exercise the token/cost plumbing without any network call.
+STUB_INPUT_TOKENS = 250
+STUB_OUTPUT_TOKENS = 180
 
 
 class StubClient:
@@ -82,7 +104,16 @@ class StubClient:
     [TASK]) and emits one decision. Clearly a stub — see KNOWN_LIMITATIONS.md.
     """
 
+    def __init__(self) -> None:
+        self.model = "stub"
+        self.last_usage: dict | None = None
+
     def complete(self, system: str, user: str) -> str:
+        self.last_usage = {
+            "model": "stub",
+            "input_tokens": STUB_INPUT_TOKENS,
+            "output_tokens": STUB_OUTPUT_TOKENS,
+        }
         if '"understanding":' in system:
             return json.dumps({
                 "understanding": (
@@ -292,6 +323,45 @@ class StubClient:
 
 
 ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# Phase 5: approximate USD prices per 1M tokens (input, output). Cost tracking
+# is an ESTIMATE for observability, never a billing source of truth. Unknown
+# models (including the stub) cost zero.
+_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-sonnet-4": (3.0, 15.0),
+    "claude-opus-4": (15.0, 75.0),
+    "claude-3-5-sonnet": (3.0, 15.0),
+    "claude-3-5-haiku": (0.8, 4.0),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.6),
+}
+
+
+def estimated_cost_usd(model: str | None, input_tokens: int,
+                       output_tokens: int) -> float:
+    """Estimate spend from token counts using the price table above."""
+    price = _MODEL_PRICES.get((model or "").strip())
+    if price is None:
+        return 0.0
+    return round(input_tokens / 1_000_000 * price[0]
+                 + output_tokens / 1_000_000 * price[1], 6)
+
+
+def take_usage(client: ModelClient) -> dict | None:
+    """Read and clear the usage of the client's most recent completion.
+
+    Clearing makes double-counting impossible even if a caller forgets that
+    a retry triggers a second (billed) call.
+    """
+    usage = getattr(client, "last_usage", None)
+    if not usage:
+        return None
+    try:
+        client.last_usage = None  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return usage
 
 
 def get_client() -> ModelClient:

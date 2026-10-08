@@ -320,7 +320,10 @@ def resume_run(run_id: str, answer: str = Form(...)):
 
 @app.get("/history", response_class=HTMLResponse, include_in_schema=False)
 def history_page(request: Request) -> str:
-    return html.history_page(db.list_runs(limit=200), mode=_mode(request))
+    rows = db.list_runs(limit=200)
+    for row in rows:  # Phase 5: attach estimated token spend for display
+        row["tokens"] = (_report(row["run_id"]) or {}).get("tokens")
+    return html.history_page(rows, mode=_mode(request))
 
 
 @app.get("/runs/{run_id}/trace", include_in_schema=False)

@@ -267,11 +267,12 @@ def history_page(runs: list[dict], mode: str = "use") -> str:
             f'<td class="dim">{esc(started)}</td>'
             f'<td class="dim">{esc(finished)}</td>'
             f'<td class="dim">{esc(_versions_cell(r))}</td>'
+            f'<td class="dim mono">{esc(_tokens_cell(r))}</td>'
             f'<td><a href="/runs/{esc(r["run_id"])}/trace">trace</a> · '
             f'<a href="/runs/{esc(r["run_id"])}/evidence">evidence</a></td></tr>'
         )
     if not rows:
-        rows = '<tr><td colspan="8" class="dim">No runs yet.</td></tr>'
+        rows = '<tr><td colspan="9" class="dim">No runs yet.</td></tr>'
     return page(
         "History",
         """
@@ -281,10 +282,20 @@ approval, resumable), completed, failed, interrupted (cut short by a restart
 or cancel).</p>
 <table>
 <tr><th>Run</th><th>State</th><th>Task</th><th>Session</th><th>Started</th>
-<th>Finished</th><th>Agent versions</th><th>Artifacts</th></tr>
+<th>Finished</th><th>Agent versions</th><th>Tokens (est.)</th>
+<th>Artifacts</th></tr>
 """ + rows + "</table>",
         active="history", mode=mode,
     )
+
+
+def _tokens_cell(run: dict) -> str:
+    """Phase 5: estimated token spend recorded in the run's report."""
+    tok = run.get("tokens")
+    if not tok:
+        return "-"
+    return (f"{int(tok.get('input', 0))}/{int(tok.get('output', 0))} "
+            f"${float(tok.get('estimated_cost_usd', 0.0)):.4f}")
 
 
 def _versions_cell(run: dict) -> str:
@@ -527,6 +538,14 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
                 for p in ev
             )
             items.append(f"<h2>evidence</h2><ul>{links}</ul>")
+        tok = report.get("tokens")
+        if tok:
+            items.append(
+                "<p><strong>model usage (estimated):</strong> "
+                f"{int(tok.get('input', 0))} in / {int(tok.get('output', 0))} out "
+                f"tokens &middot; ${float(tok.get('estimated_cost_usd', 0.0)):.4f} "
+                f"&middot; {esc(tok.get('model') or 'unknown')}</p>"
+            )
         report_html = ('<div class="panel" id="report"><h2>final report</h2>'
                        + "".join(items) + "</div>")
     err_html = (f'<p class="err">{esc(error)}</p>' if error else "")
@@ -538,8 +557,16 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
   const panel = document.getElementById("answer-panel");
   const qEl = document.getElementById("answer-question");
   const stateEl = document.getElementById("state-badge");
+  const tokenEl = document.getElementById("token-total");
+  const tokens = {{input: 0, output: 0, cost: 0.0}};
   const setState = function(s) {{
     if (stateEl) {{ stateEl.className = "badge " + s; stateEl.textContent = s; }}
+  }};
+  const setTokens = function() {{
+    if (!tokenEl) return;
+    tokenEl.style.display = "";
+    tokenEl.textContent = "tokens " + tokens.input + " in / " + tokens.output +
+      " out · est. $" + tokens.cost.toFixed(4);
   }};
   const es = new EventSource("/runs/{esc(run_id)}/events");
   es.onmessage = function(m) {{
@@ -575,6 +602,12 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
       setState("running");
       if (panel) panel.style.display = "none";
     }}
+    if (ev.event === "model_call") {{
+      tokens.input += Number(ev.input_tokens || 0);
+      tokens.output += Number(ev.output_tokens || 0);
+      tokens.cost += Number(ev.estimated_cost_usd || 0);
+      setTokens();
+    }}
   }};
 }})();
 </script>"""
@@ -596,7 +629,7 @@ def run_detail_page(run_id: str, task: str, status: str, session: dict | None,
 {answer_form(run_id, question, waiting)}
 {resume_html}
 {approval_panel}
-<h2>live trace</h2>
+<h2>live trace <span class="badge" id="token-total" style="display:none"></span></h2>
 <div class="trace" id="trace"></div>
 <h2>agents</h2>
 <div id="agents" {poll}>{agents_html}</div>

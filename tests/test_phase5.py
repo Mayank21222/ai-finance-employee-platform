@@ -15,9 +15,11 @@ os.environ.setdefault("DASH_DB",
 os.environ["STUB_MODEL"] = "1"
 
 from ai_operator.graph import DEFAULT_FLOW_PATH  # noqa: E402
+from ai_operator.llm import estimated_cost_usd, get_client, take_usage  # noqa: E402
 from platform.dashboard import db, runner  # noqa: E402
 from platform.dashboard import app as dashapp  # noqa: E402
 
+RUNS_ROOT = dashapp.RUNS_ROOT
 client = TestClient(dashapp.app)
 db.init_db()
 
@@ -92,29 +94,71 @@ MIN_AGENT_FLOW = {
 }
 
 
-def test_run_records_agent_versions_used(tmp_path):
-    flow_path = tmp_path / "ver_flow.json"
+def _run_mini_flow(tmp_path, name: str) -> str:
+    """Start MIN_AGENT_FLOW (one stub classification -> end) and wait for it."""
+    flow_path = tmp_path / name
     flow_path.write_text(json.dumps(MIN_AGENT_FLOW), encoding="utf-8")
     os.environ["COMP_OPS_FLOW"] = str(flow_path)
     os.environ["COMP_OPS_SKIP_APP"] = "1"
+    resp = client.post("/runs", data={"session_id": "1", "task": "say hi"},
+                       follow_redirects=False)
+    assert resp.status_code == 303, resp.text
+    run_id = resp.headers["location"].rsplit("/", 1)[-1]
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        handle = runner.get(run_id)
+        if handle is not None and handle.terminal:
+            return run_id
+        time.sleep(0.05)
+    raise AssertionError("run did not finish")
+
+
+def test_run_records_agent_versions_used(tmp_path):
     try:
         expected = len(db.list_versions("cls")) + 1
-        resp = client.post("/runs", data={"session_id": "1", "task": "say hi"},
-                           follow_redirects=False)
-        assert resp.status_code == 303
-        run_id = resp.headers["location"].rsplit("/", 1)[-1]
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            handle = runner.get(run_id)
-            if handle is not None and handle.terminal:
-                break
-            time.sleep(0.05)
-        else:
-            raise AssertionError("run did not finish")
+        run_id = _run_mini_flow(tmp_path, "ver_flow.json")
         row = db.get_run(run_id)
         assert json.loads(row["agent_versions_used"]) == {"cls": expected}
         # The history page shows which version the run used.
         assert f"cls v{expected}" in client.get("/history").text
+    finally:
+        os.environ.pop("COMP_OPS_FLOW", None)
+        os.environ.pop("COMP_OPS_SKIP_APP", None)
+
+
+# --- P5-2 token and cost tracking -------------------------------------------
+
+
+def test_estimated_cost_usd_math_and_usage_reset():
+    # Claude Sonnet 4.6: $3 / 1M input tokens, $15 / 1M output tokens.
+    assert estimated_cost_usd("claude-sonnet-4-6", 1_000_000, 1_000_000) == 18.0
+    assert estimated_cost_usd("stub", 250, 180) == 0.0  # unknown model -> free
+    stub = get_client()  # STUB_MODEL=1 in this module
+    stub.complete("system", "user")
+    usage = take_usage(stub)
+    assert usage["input_tokens"] == 250 and usage["output_tokens"] == 180
+    assert take_usage(stub) is None  # cleared: a retry can never double-count
+
+
+def test_run_records_token_usage_in_report_and_history(tmp_path):
+    try:
+        run_id = _run_mini_flow(tmp_path, "tok_flow.json")
+        report = json.loads(
+            (RUNS_ROOT / run_id / "report.json").read_text(encoding="utf-8"))
+        tok = report["tokens"]
+        assert tok["input"] >= 250 and tok["output"] >= 180
+        assert tok["total"] == tok["input"] + tok["output"]
+        assert tok["model"] == "stub"
+        # The trace records one model_call event per model call.
+        events = [
+            json.loads(line)
+            for line in (RUNS_ROOT / run_id / "trace.jsonl").read_text(
+                encoding="utf-8").splitlines() if line.strip()
+        ]
+        calls = [e for e in events if e.get("event") == "model_call"]
+        assert calls and all(e["estimated_cost_usd"] == 0.0 for e in calls)
+        # History page shows the token cell for this run.
+        assert f'{tok["input"]}/{tok["output"]}' in client.get("/history").text
     finally:
         os.environ.pop("COMP_OPS_FLOW", None)
         os.environ.pop("COMP_OPS_SKIP_APP", None)

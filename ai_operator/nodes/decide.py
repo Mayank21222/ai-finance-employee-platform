@@ -5,7 +5,7 @@ from __future__ import annotations
 from langgraph.types import interrupt
 from pydantic import ValidationError
 
-from ai_operator.llm import ModelClient
+from ai_operator.llm import ModelClient, estimated_cost_usd, take_usage
 from ai_operator.prompt_loader import extract_json, load_prompt
 from ai_operator.state import AgentState, Decision
 from ai_operator.tools.registry import describe_for_prompt
@@ -64,6 +64,7 @@ def run_decide(
     agent_system: str | None = None,
     agent_instructions: str | None = None,
     documents: list[str] | None = None,
+    agent_node: str | None = None,
 ) -> dict:
     run_id = state["run_id"]
     step = int(state.get("step_count", 0)) + 1
@@ -83,7 +84,8 @@ def run_decide(
         system = f"{agent_system}\n\n{system}"
     user = _user_prompt(state, agent_instructions, documents)
     raw = client.complete(system, user)
-    decision, failures = _validate(raw, client, system, user)
+    usages = [take_usage(client)]
+    decision, failures = _validate(raw, client, system, user, usages)
     if decision is None:
         answer = interrupt({
             "kind": "model_decision_request",
@@ -125,6 +127,7 @@ def run_decide(
     }
     if decision.plan_update:
         updates["plan"] = decision.plan_update
+    _record_usage(updates, state, usages, agent_node, step)
     trace_event(
         run_id, "decision", step=step, action_type=decision.action_type,
         tool_name=decision.tool_name, tool_args=decision.tool_args,
@@ -134,7 +137,31 @@ def run_decide(
     return updates
 
 
-def _validate(raw: str, client: ModelClient, system: str, user: str) -> tuple[Decision | None, int]:
+def _record_usage(updates: dict, state: AgentState, usages: list[dict | None],
+                  node: str | None, step: int) -> None:
+    """Phase 5: fold this step's model calls into the run totals and trace them."""
+    for usage in usages:
+        if not usage:
+            continue
+        inp = int(usage.get("input_tokens", 0) or 0)
+        out = int(usage.get("output_tokens", 0) or 0)
+        updates["total_input_tokens"] = (
+            updates.get("total_input_tokens", state.get("total_input_tokens", 0))
+            + inp
+        )
+        updates["total_output_tokens"] = (
+            updates.get("total_output_tokens", state.get("total_output_tokens", 0))
+            + out
+        )
+        updates["model_name"] = usage.get("model") or state.get("model_name")
+        trace_event(state["run_id"], "model_call", step=step, node=node,
+                    model=usage.get("model"), input_tokens=inp, output_tokens=out,
+                    estimated_cost_usd=estimated_cost_usd(
+                        usage.get("model"), inp, out))
+
+
+def _validate(raw: str, client: ModelClient, system: str, user: str,
+              usages: list[dict | None] | None = None) -> tuple[Decision | None, int]:
     failures = 0
     try:
         return Decision.model_validate(extract_json(raw)), failures
@@ -146,6 +173,8 @@ def _validate(raw: str, client: ModelClient, system: str, user: str) -> tuple[De
         f"{user}\n\n[SCHEMA ERROR]\nYour previous output was rejected: {reason}\n"
         "Return the corrected JSON object only.",
     )
+    if usages is not None:
+        usages.append(take_usage(client))
     try:
         return Decision.model_validate(extract_json(raw)), failures
     except (ValidationError, ValueError):

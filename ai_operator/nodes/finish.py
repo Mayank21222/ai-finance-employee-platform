@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ai_operator.llm import estimated_cost_usd
 from ai_operator.state import AgentState
 from ai_operator.tracing import get_logger, trace_event
 
@@ -23,12 +24,23 @@ def run_finish(state: AgentState) -> dict:
         status = "failed"
 
     summary = _summary(state, status, verification)
+    input_tokens = int(state.get("total_input_tokens", 0) or 0)
+    output_tokens = int(state.get("total_output_tokens", 0) or 0)
+    model = state.get("model_name")
     report = {
         "run_id": run_id,
         "task": state["task"],
         "status": status,
         "summary": summary,
         "steps": state.get("step_count", 0),
+        "tokens": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "total": input_tokens + output_tokens,
+            "model": model,
+            "estimated_cost_usd": estimated_cost_usd(model, input_tokens,
+                                                     output_tokens),
+        },
         "actions": [
             h for h in state.get("history", []) if h.get("kind") in {"tool", "approval", "ask"}
         ],
