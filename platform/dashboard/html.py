@@ -1125,8 +1125,94 @@ def node_version_compare(node_id: str, current: dict, snapshot: dict) -> str:
 </div>"""
 
 
+def _draft_row(old: dict, new: dict) -> tuple[str, str]:
+    """(status, changed-detail) for one node in the draft diff."""
+    if old is None:
+        return "added", ""
+    if new is None:
+        return "removed", ""
+    if old == new:
+        return "unchanged", ""
+    keys = [k for k in sorted(set(old) | set(new)) if old.get(k) != new.get(k)]
+    bits = []
+    for k in keys[:4]:
+        a, b = str(old.get(k) or ""), str(new.get(k) or "")
+        bits.append(f"{k}: {a[:40]} \u2192 {b[:40]}")
+    more = f" (+{len(keys) - 4} more)" if len(keys) > 4 else ""
+    return "changed", "; ".join(bits) + more
+
+
+def draft_diff(old_cfg: dict, draft: dict) -> str:
+    """Side-by-side diff of the current flow against the draft."""
+    old_nodes = {n.get("node_id"): n for n in old_cfg.get("nodes") or []}
+    new_nodes = {n.get("node_id"): n for n in draft.get("nodes") or []}
+    rows = ""
+    for nid in list(old_nodes) + [i for i in new_nodes if i not in old_nodes]:
+        status, detail = _draft_row(old_nodes.get(nid), new_nodes.get(nid))
+        colour = {"added": "ok", "removed": "err",
+                  "changed": "warn"}.get(status, "dim")
+        old_cell = (json.dumps(old_nodes[nid], indent=1)[:400]
+                    if nid in old_nodes else "(absent)")
+        new_cell = (json.dumps(new_nodes[nid], indent=1)[:400]
+                    if nid in new_nodes else "(absent)")
+        rows += (
+            f'<tr><td class="mono"><strong>{esc(nid)}</strong></td>'
+            f'<td><span class="badge" style="color:var(--{colour})">'
+            f'{status}</span></td>'
+            f'<td class="mono" style="white-space:pre-wrap">{esc(old_cell)}'
+            f'</td><td class="mono" style="white-space:pre-wrap">'
+            f'{esc(new_cell)}</td><td class="dim">{esc(detail)}</td></tr>')
+    # flow-level changes (start node, session context, limits)
+    for key in ("start_node_id", "session_context", "max_visits_per_node",
+                "max_total_visits"):
+        a, b = old_cfg.get(key), draft.get(key)
+        if a != b:
+            rows += (
+                f'<tr><td class="mono"><strong>(flow)</strong> {esc(key)}'
+                f'</td><td><span class="badge" style="color:var(--warn)">'
+                f'changed</span></td>'
+                f'<td class="mono">{esc(json.dumps(a))[:400]}</td>'
+                f'<td class="mono">{esc(json.dumps(b))[:400]}</td>'
+                f'<td></td></tr>')
+    if not rows:
+        rows = '<tr><td colspan="5" class="dim">No differences.</td></tr>'
+    return (
+        '<table><tr><th>Node</th><th>Status</th><th>Current</th>'
+        f'<th>Draft</th><th>Changes</th></tr>{rows}</table>')
+
+
+def draft_panel(old_cfg: dict, draft: dict) -> str:
+    """Phase 6 section 4: preview of a valid draft - nothing saved yet."""
+    return f"""
+<div class="panel">
+<p><span class="badge completed">draft ready</span> This is a preview only:
+nothing is saved until you click Apply.</p>
+<h3>Diff against the current flow</h3>
+{draft_diff(old_cfg, draft)}
+<h3>Draft preview (SVG editor)</h3>
+<div class="panel">{flow_svg(draft)}</div>
+<form method="post" action="/flow/draft/apply" class="row">
+  <input type="hidden" name="draft" value="{esc(json.dumps(draft))}">
+  <button class="primary">Apply draft</button>
+  <span class="dim">Applying saves the config and records an "AI draft"
+  version row for every changed agent.</span>
+</form>
+</div>"""
+
+
+def draft_rejected(errors: list[str]) -> str:
+    """A draft that failed validation twice - nothing was applied."""
+    items = "".join(f"<li>{esc(e)}</li>" for e in errors)
+    return f"""
+<div class="panel">
+<p><span class="badge interrupted">draft rejected</span> Nothing was applied
+to the current flow.</p>
+<ul class="err">{items}</ul>
+</div>"""
+
+
 def flow_page(cfg: dict, errors: list[str] | None = None,
-              mode: str = "use") -> str:
+              mode: str = "use", message: str = "") -> str:
     node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
     options = "".join(f'<option value="{esc(i)}">{esc(i)}</option>'
                       for i in node_ids)
@@ -1170,6 +1256,7 @@ def flow_page(cfg: dict, errors: list[str] | None = None,
         "Flow editor",
         f"""
 <h1>Flow editor</h1>
+{f'<p class="ok">{esc(message)}</p>' if message else ''}
 <div class="row">
   <button hx-post="/flow/validate" hx-target="#validation"
           hx-swap="innerHTML">Validate flow</button>
@@ -1177,6 +1264,19 @@ def flow_page(cfg: dict, errors: list[str] | None = None,
   <span class="dim">Saved config: configs/finance_employee.json</span>
 </div>
 {validation_panel(errors)}
+<div class="mode-edit">
+<h2>Draft with AI</h2>
+<p class="dim">Describe the employee you want; the model drafts a flow
+config. You see a diff and a preview first - it is applied only when you
+click Apply, and it can never enable a tool your role does not hold.</p>
+<form method="post" action="/flow/draft" class="row"
+      hx-post="/flow/draft" hx-target="#draft-result" hx-swap="innerHTML">
+  <input name="description" style="flex:3" required
+         placeholder="plain-English description of the employee">
+  <button class="primary">Draft</button>
+</form>
+<div id="draft-result"></div>
+</div>
 <h2>Connections</h2>
 <form method="post" action="/flow/connections" class="row">
   <select name="source">{options}</select>

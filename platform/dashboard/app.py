@@ -26,6 +26,7 @@ from ai_operator.tools import connectors as connector_tools
 from ai_operator.tracing import RUNS_ROOT
 from platform.dashboard import (channels, db, flowcfg, html, runner,
                                 scheduler)
+from platform.dashboard import drafting
 from platform.flow import compiler
 from platform.flow.models import Flow, load_flow
 from platform.flow.validator import SUPPORTED_HTTP_METHODS, validate
@@ -1365,8 +1366,58 @@ def _audit_events(run_id: str = "", node: str = "", event: str = "",
 
 
 @app.get("/flow", response_class=HTMLResponse, include_in_schema=False)
-def flow_page(request: Request) -> str:
-    return html.flow_page(flowcfg.load_cfg(), mode=_mode(request))
+def flow_page(request: Request, message: str = "") -> str:
+    return html.flow_page(flowcfg.load_cfg(), mode=_mode(request),
+                          message=message)
+
+
+@app.post("/flow/draft", response_class=HTMLResponse, include_in_schema=False)
+def flow_draft(description: str = Form("")):
+    """Phase 6 section 4: draft a flow from plain English (preview only).
+
+    Never writes: the response is a diff + SVG preview with an Apply
+    button, or the rejection list when two attempts failed validation.
+    """
+    cfg = flowcfg.load_cfg()
+    if not description.strip():
+        return HTMLResponse(html.draft_rejected(
+            ["Describe the employee you want first."]))
+    role = str((cfg.get("session_context") or {}).get("user_role") or "")
+    draft, errors = drafting.draft_flow(description, cfg, role)
+    if draft is None:
+        return HTMLResponse(html.draft_rejected(errors))
+    return HTMLResponse(html.draft_panel(cfg, draft))
+
+
+@app.post("/flow/draft/apply", include_in_schema=False)
+def flow_draft_apply(draft: str = Form(...)):
+    """Apply a human-approved draft: validate-before-write, then record
+    an "AI draft" version row for every changed agent."""
+    try:
+        draft_cfg = json.loads(draft)
+    except ValueError:
+        draft_cfg = None
+    if not isinstance(draft_cfg, dict):
+        return HTMLResponse(
+            html.flow_page(flowcfg.load_cfg(),
+                           errors=["The draft payload is not valid JSON."]),
+            status_code=400)
+    old_cfg = flowcfg.load_cfg()
+    role = str((old_cfg.get("session_context") or {}).get("user_role") or "")
+    # The human gate cannot bypass validation: re-check the draft against
+    # the CURRENT config and role before anything is written.
+    errors = drafting.check(draft_cfg, role)
+    if errors:
+        return HTMLResponse(html.flow_page(old_cfg, errors=errors),
+                            status_code=400)
+    changed = drafting.changed_agents(old_cfg, draft_cfg)
+    errors = flowcfg.save_cfg(draft_cfg)  # authoritative validate-before-write
+    if errors:
+        return HTMLResponse(html.flow_page(old_cfg, errors=errors),
+                            status_code=400)
+    for node_id, previous in changed:
+        db.add_version(node_id, previous, label="AI draft")
+    return RedirectResponse("/flow?message=Draft+applied", status_code=303)
 
 
 @app.post("/flow/validate", response_class=HTMLResponse, include_in_schema=False)
