@@ -185,3 +185,74 @@ def test_data_model_fields_drive_prompt_variables_and_verifier():
         assert mc["fields"]["due_date"]["ok"]
     finally:
         _models_reset(["Invoice", "E2EInvoice"])
+
+
+def test_field_level_permission_rejects_unauthorized_write():
+    """Mandated Phase 4 test: field-level permission rejection.
+
+    An agent outside a field's write_agents list cannot write that field -
+    the write is refused in code (not in a prompt), traced as
+    permission_denied, and the variable stays unset. The same write by an
+    allowed agent goes through, and a non-model session variable (task_type)
+    stays unrestricted for everyone.
+    """
+    from ai_operator.tracing import RUNS_ROOT, TraceLogger, unregister
+    from ai_operator.variables import write_permission
+    from platform.flow.compiler import compile_flow
+    from platform.flow.models import Flow
+
+    class FinishClient:
+        def complete(self, system: str, user: str) -> str:
+            if '"understanding":' in system:
+                return json.dumps({"understanding": "u", "plan": "p"})
+            return json.dumps({
+                "thought": "writing the amount field",
+                "action_type": "finish", "tool_name": None, "tool_args": {},
+                "plan_update": None, "expected_outcome": "99999",
+            })
+
+    def run_as(node_id: str) -> tuple[dict, list[dict]]:
+        run_id = "p4_perm_" + uuid.uuid4().hex[:8]
+        flow = Flow.model_validate({
+            "start_node_id": node_id,
+            "session_context": {"tenant": "acme", "currency": "INR",
+                                "approval_threshold": 50000.0,
+                                "user_role": "finance_operator",
+                                "tools_enabled": []},
+            "nodes": [
+                {"type": "agent", "node_id": node_id,
+                 "data_model": "Invoice", "save_as": "amount",
+                 "instructions": "amount",
+                 "next_node_ids": ["report"], "fallback_next": "report"},
+                {"type": "end", "node_id": "report"},
+            ],
+        })
+        logger = TraceLogger(run_id)
+        try:
+            final = compile_flow(flow, FinishClient()).compile().invoke({
+                "task": "set the amount field",
+                "run_id": run_id,
+                **INITIAL_STATE_KEYS,
+            })
+            return final, logger.events()
+        finally:
+            unregister(run_id)
+            shutil.rmtree(RUNS_ROOT / run_id, ignore_errors=True)
+
+    # A read-only agent (not in amount's write_agents) is refused...
+    denied, events = run_as("policy_agent")
+    assert "amount" not in denied["variables"], (
+        "a denied write must never touch state['variables']")
+    assert str(denied["last_observation"]).startswith("PERMISSION DENIED")
+    denied_events = [e for e in events if e["event"] == "permission_denied"]
+    assert denied_events, "the refusal must be traced as permission_denied"
+    assert denied_events[0]["node"] == "policy_agent"
+    assert denied_events[0]["name"] == "amount"
+    assert denied_events[0]["new"] == "99999"
+
+    # ...while ap_agent (listed in write_agents) writes the same field.
+    allowed, _ = run_as("ap_agent")
+    assert allowed["variables"].get("amount") == "99999"
+
+    # Session variables that are not model fields stay unrestricted.
+    assert write_permission("classifier", "task_type") == ""
