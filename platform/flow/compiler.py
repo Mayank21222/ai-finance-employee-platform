@@ -61,6 +61,34 @@ def _skill_block(skill_names: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def build_test_prompt(node: dict, task: str) -> tuple[str, str]:
+    """Phase 5: the minimal prompt the agent test panel sends to the model.
+
+    Uses only the agent's own configuration - system prompt, attached skills,
+    data model block - plus a simplified user message. No graph, no tools, no
+    browser. Kept next to _add_agent so the wording stays in step with runtime.
+    """
+    persona = _resolve_system_prompt(str(node.get("system_prompt") or ""))
+    skill_block = _skill_block(list(node.get("skills") or []))
+    if skill_block:
+        persona = f"{persona or ''}\n{skill_block}".strip()
+    data_model = node.get("data_model")
+    if data_model:
+        block = datamodel.prompt_block(str(data_model))
+        if block:
+            persona = f"{persona or ''}\n{block}".strip()
+    instructions = str(node.get("instructions") or "").strip()
+    user = (
+        "[AGENT INSTRUCTIONS]\n"
+        + (instructions or "(none)")
+        + "\n\n[TASK]\n"
+        + (task.strip() or "(no sample task provided)")
+        + "\n\nReason about this task and describe exactly what you would do "
+        "next. Do not call any tools."
+    )
+    return persona, user
+
+
 def compile_flow(flow: Flow, client: Any) -> StateGraph:
     """Validate the flow, then build the StateGraph (not yet compiled)."""
     errors = validate(flow)

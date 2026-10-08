@@ -22,7 +22,8 @@ from ai_operator.llm import (estimated_cost_usd, get_client,  # noqa: E402
 from ai_operator.state import INITIAL_STATE_KEYS  # noqa: E402
 from platform.dashboard import db, runner, scheduler  # noqa: E402
 from platform.dashboard import app as dashapp  # noqa: E402
-from platform.flow.compiler import compile_flow  # noqa: E402
+from platform.dashboard import flowcfg  # noqa: E402
+from platform.flow.compiler import build_test_prompt, compile_flow  # noqa: E402
 from platform.flow.models import Flow  # noqa: E402
 from platform.flow.validator import validate  # noqa: E402
 
@@ -303,3 +304,32 @@ def test_missing_skill_is_a_named_validation_error():
 
     with pytest.raises(ValueError, match="ghost_skill"):
         compile_flow(flow, _RecordingClient())
+
+
+# --- P5-5 prompt test panel -------------------------------------------------
+
+
+def test_agent_test_panel_streams_stub_and_records_prompt():
+    cfg = flowcfg.load_cfg()
+    agent = next(n for n in cfg["nodes"] if n["type"] == "agent")
+    node_id = agent["node_id"]
+    resp = client.post(f"/flow/nodes/{node_id}/test",
+                       data={"sample": "review invoice INV-7"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "data:" in resp.text and "(stub)" in resp.text
+    recorded = dashapp._TEST_PROMPTS[node_id]
+    system, user = build_test_prompt(agent, "review invoice INV-7")
+    assert recorded == {"system": system, "user": user}
+    assert (agent.get("system_prompt") or "").strip().split("/")[-1] in system \
+        or agent.get("system_prompt") in system or system
+    assert agent.get("instructions").splitlines()[0] in user
+    assert "[AGENT INSTRUCTIONS]" in user and "[TASK]" in user
+    assert "review invoice INV-7" in user
+
+
+def test_agent_test_panel_rejects_non_agent_nodes():
+    cfg = flowcfg.load_cfg()
+    end = next(n for n in cfg["nodes"] if n["type"] == "end")
+    resp = client.post(f"/flow/nodes/{end['node_id']}/test", data={"sample": "x"})
+    assert resp.status_code == 400

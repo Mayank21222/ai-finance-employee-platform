@@ -18,10 +18,12 @@ from fastapi.responses import (FileResponse, HTMLResponse,
 from fastapi.staticfiles import StaticFiles
 
 from ai_operator.graph import DEFAULT_FLOW_PATH
+from ai_operator.llm import get_client
 from ai_operator.permissions import PermissionLevel
 from ai_operator.tools import connectors as connector_tools
 from ai_operator.tracing import RUNS_ROOT
 from platform.dashboard import db, flowcfg, html, runner, scheduler
+from platform.flow import compiler
 from platform.flow.models import Flow, load_flow
 from platform.flow.validator import SUPPORTED_HTTP_METHODS, validate
 
@@ -995,6 +997,50 @@ def flow_node_version_restore(node_id: str, version: int) -> Response:
         cfg, node_id, message=f"Restored v{version}."))
     response.headers["HX-Trigger"] = "refresh-diagram"
     return response
+
+
+# --- prompt test panel (Phase 5) -------------------------------------------
+
+_TEST_PROMPTS: dict[str, dict[str, str]] = {}
+"""Last built prompt per node, for tests and debugging the test panel."""
+
+
+@app.post("/flow/nodes/{node_id}/test", include_in_schema=False)
+def flow_node_test(node_id: str, sample: str = Form("")):
+    """Build a no-tools prompt from the agent's saved config and stream a reply.
+
+    The response uses the run console's SSE shape: `data: {json}` lines with
+    incremental text, ending with a done event. No tools or browser run.
+    """
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if str(n.get("node_id")) == node_id), None)
+    if node is None:
+        return HTMLResponse(html.not_found(f"No node '{node_id}'."),
+                            status_code=404)
+    if node.get("type") != "agent":
+        return HTMLResponse(
+            html.page("Flow editor",
+                      '<h1 class="err">Only agent nodes can be tested.</h1>'
+                      '<p><a href="/flow">Back</a></p>', active="flow"),
+            status_code=400)
+    system, user = compiler.build_test_prompt(node, sample)
+    _TEST_PROMPTS[node_id] = {"system": system, "user": user}
+
+    def event_stream():
+        if os.environ.get("STUB_MODEL"):
+            text = (f"(stub) {node_id} would reason about: "
+                    f"{sample.strip() or 'the task'}.")
+        else:
+            try:
+                text = get_client().complete(system, user)
+            except Exception as exc:  # noqa: BLE001 - surface, never crash
+                text = f"[test panel error] {exc!r}"
+        for i in range(0, len(text), 80):
+            yield f"data: {json.dumps({'text': text[i:i + 80]})}\n\n"
+        yield 'data: {"done": true}\n\n'
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # --- agents editor ---------------------------------------------------------

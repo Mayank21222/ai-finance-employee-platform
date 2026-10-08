@@ -902,8 +902,21 @@ def node_edit_panel(cfg: dict, node_id: str, message: str = "",
           >{options(str(node.get("fallback_next") or ""))}</select></label>
       <button class="primary">Save node</button>
     </div>"""
+        test_panel = f"""
+<div class="panel" style="margin-top:12px">
+  <h2 style="margin:0">Test this agent</h2>
+  <p class="dim">Builds a prompt from this node's saved config - system prompt,
+  attached skills, data model - with no tools, and streams the reply.</p>
+  <p><textarea id="test-sample" rows="3" style="width:100%"
+    placeholder="sample task, e.g. check invoice INV-1"></textarea></p>
+  <button type="button" class="primary" id="test-run"
+    onclick="runNodeTest('{esc(node_id)}')">Run test</button>
+  <pre id="test-output" class="mono"
+    style="white-space:pre-wrap;margin-top:8px"></pre>
+</div>"""
         extra = (f'<p class="dim">Attached documents: {esc(docs)}</p>'
-                 f'<p class="row">{badges}</p>')
+                 f'<p class="row">{badges}</p>'
+                 f"{test_panel}")
     elif kind == "message":
         primary = str((node.get("next_node_ids") or [""])[0])
         fields = f"""
@@ -1110,7 +1123,38 @@ diagram; saving refreshes this diagram. Connections still use the form above.</p
   <div id="node-panel" class="panel">
     <span class="dim">Click a node in the diagram to edit it.</span>
   </div>
-</div>""",
+</div>
+<script>
+async function runNodeTest(nodeId) {{
+  const out = document.getElementById("test-output");
+  const sampleEl = document.getElementById("test-sample");
+  if (!out) return;
+  out.textContent = "";
+  const body = new URLSearchParams({{sample: sampleEl ? sampleEl.value : ""}});
+  const resp = await fetch("/flow/nodes/" + nodeId + "/test",
+                           {{method: "POST", body: body}});
+  if (!resp.body) {{ out.textContent = await resp.text(); return; }}
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {{
+    const {{done, value}} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {{stream: true}});
+    let i;
+    while ((i = buf.indexOf("\\n\\n")) >= 0) {{
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      if (chunk.startsWith("data: ")) {{
+        try {{
+          const d = JSON.parse(chunk.slice(6));
+          if (d.text) out.textContent += d.text;
+        }} catch (e) {{}}
+      }}
+    }}
+  }}
+}}
+</script>""",
         active="flow", mode=mode,
     )
 
