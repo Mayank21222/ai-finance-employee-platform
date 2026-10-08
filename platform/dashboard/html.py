@@ -99,6 +99,12 @@ _CSS = """
      switches which sections (and nav links) are visible. */
   [data-mode="use"] .mode-edit { display:none; }
   [data-mode="configure"] .mode-run { display:none; }
+  /* Phase 4: clickable SVG flow editor - diagram left, node panel right. */
+  .flow-layout { display:flex; gap:16px; align-items:flex-start; }
+  .flow-layout #diagram { flex:1 1 auto; overflow-x:auto; min-height:140px; }
+  .flow-layout #node-panel { flex:0 0 360px; min-height:140px; }
+  .fnode { cursor:pointer; }
+  .fnode:hover .nshape { stroke:#fff; }
 """
 
 
@@ -636,6 +642,207 @@ def validation_panel(errors: list[str] | None = None) -> str:
             f"<ul>{lis}</ul></div>")
 
 
+NODE_STROKE = {"agent": "#4da3ff", "message": "#3ecf8e",
+               "verify": "#f0b429", "end": "#8b98a7"}
+
+
+def flow_svg(cfg: dict) -> str:
+    """Server-generated clickable SVG of the flow (Phase 4 WYSIWYG editor).
+
+    Fixed layout: nodes in config order top-to-bottom, edges routed as
+    straight lines through right-hand lanes (solid = next, dashed =
+    fallback, labeled = verify match/mismatch). Each node shape carries
+    hx-get so a click swaps that node's edit form into #node-panel.
+    """
+    nodes = cfg.get("nodes", [])
+    ids = [str(n.get("node_id")) for n in nodes]
+    if not ids:
+        return '<p class="dim">This flow has no nodes to draw.</p>'
+    x, w, h, gap = 80, 240, 52, 46
+    pitch, top = h + gap, 40
+    idx = {nid: i for i, nid in enumerate(ids)}
+
+    edges: list[tuple[str, str, str, bool]] = []
+    for n in nodes:
+        nid = str(n["node_id"])
+        nexts = [str(t) for t in (n.get("next_node_ids") or [])]
+        for target in nexts:
+            if target in idx:
+                edges.append((nid, target, "", False))
+        fb = n.get("fallback_next")
+        if fb and str(fb) in idx and str(fb) not in nexts:
+            edges.append((nid, str(fb), "fallback", True))
+        if n.get("type") == "verify":
+            for key, label in (("match_next", "match"),
+                               ("mismatch_next", "mismatch")):
+                target = n.get(key)
+                if target and str(target) in idx:
+                    edges.append((nid, str(target), label, False))
+
+    lane0 = x + w + 30
+    width = lane0 + 14 * len(edges) + 96
+    height = top + len(ids) * pitch + 16
+    out = [
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" '
+        f'height="{height}" xmlns="http://www.w3.org/2000/svg" '
+        'role="img" aria-label="flow diagram">',
+        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto">'
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#4a5768"/></marker></defs>',
+    ]
+
+    def cy(nid: str) -> int:
+        return top + idx[nid] * pitch + h // 2
+
+    for k, (src, dst, label, dashed) in enumerate(edges):
+        lane = lane0 + k * 14
+        y1, y2 = cy(src), cy(dst)
+        if src == dst:
+            path = f"M {x + w} {y1 - 10} H {lane} V {y1 + 10} H {x + w}"
+            mid = y1
+        else:
+            path = f"M {x + w} {y1} H {lane} V {y2} H {x + w}"
+            mid = (y1 + y2) // 2
+        dash = ' stroke-dasharray="7 5"' if dashed else ""
+        out.append(f'<path d="{path}" fill="none" stroke="#4a5768" '
+                   f'stroke-width="1.5"{dash} marker-end="url(#arrow)"/>')
+        if label:
+            out.append(f'<text x="{lane + 5}" y="{mid - 4}" fill="#8b98a7" '
+                       f'font-size="10">{esc(label)}</text>')
+
+    start = str(cfg.get("start_node_id", ""))
+    if start in idx:
+        sy = cy(start)
+        out.append(f'<ellipse cx="36" cy="{sy}" rx="28" ry="14" '
+                   'fill="#171e26" stroke="#8b98a7"/>')
+        out.append(f'<text x="36" y="{sy + 4}" text-anchor="middle" '
+                   'fill="#d7dee7" font-size="11">start</text>')
+        out.append(f'<path d="M 64 {sy} H {x}" fill="none" stroke="#4a5768" '
+                   'stroke-width="1.5" marker-end="url(#arrow)"/>')
+
+    for n in nodes:
+        nid = str(n["node_id"])
+        kind = str(n.get("type", "?"))
+        y = top + idx[nid] * pitch
+        stroke = NODE_STROKE.get(kind, "#8b98a7")
+        common = (f'fill="#1c2733" stroke="{stroke}" stroke-width="1.5" '
+                  'class="nshape"')
+        if kind == "verify":
+            pts = (f"{x},{y + h // 2} {x + w * 0.15},{y} {x + w * 0.85},{y} "
+                   f"{x + w},{y + h // 2} {x + w * 0.85},{y + h} "
+                   f"{x + w * 0.15},{y + h}")
+            shape = f'<polygon points="{pts}" {common}/>'
+        else:
+            rx = h // 2 if kind == "end" else (16 if kind == "message" else 8)
+            shape = (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
+                     f'rx="{rx}" {common}/>')
+        sub = kind if not n.get("save_as") else \
+            f"{kind} · {n.get('save_as')}"
+        body = (
+            shape
+            + f'<text x="{x + w // 2}" y="{y + 22}" text-anchor="middle" '
+              f'fill="#d7dee7" font-size="13" font-weight="600">{esc(nid)}</text>'
+            + f'<text x="{x + w // 2}" y="{y + 39}" text-anchor="middle" '
+              f'fill="#8b98a7" font-size="10">{esc(sub)}</text>'
+        )
+        out.append(
+            f'<g class="fnode" hx-get="/flow/nodes/{esc(nid)}" '
+            f'hx-target="#node-panel" hx-swap="innerHTML">'
+            f"<title>{esc(nid)} - click to edit</title>{body}</g>"
+        )
+    out.append("</svg>")
+    return "".join(out)
+
+
+def node_edit_panel(cfg: dict, node_id: str, message: str = "",
+                    error: str = "") -> str:
+    """The click-to-edit form for one node, swapped into #node-panel."""
+    node = next((n for n in cfg.get("nodes", [])
+                 if str(n.get("node_id")) == node_id), None)
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    if node is None:
+        return (f'<div class="panel" id="node-panel">{msg}{err}'
+                f'<p class="err">No node named {esc(node_id)} in this flow.'
+                "</p></div>")
+    kind = str(node.get("type", "?"))
+    ids = [str(n["node_id"]) for n in cfg.get("nodes", [])]
+
+    def options(selected: str) -> str:
+        return "".join(
+            f'<option value="{esc(i)}" {"selected" if i == selected else ""}>'
+            f"{esc(i)}</option>" for i in ids)
+
+    form_open = (f'<form hx-post="/flow/nodes/{esc(node_id)}" '
+                 'hx-target="#node-panel" hx-swap="innerHTML">')
+    extra = ""
+    if kind == "agent":
+        badges = "".join(
+            tool_badge(node_id, t, t in (node.get("tools_enabled") or []))
+            for t in _registry_names())
+        docs = ", ".join(node.get("documents") or []) or "none"
+        fields = f"""
+    <p><label class="dim">System prompt (file path or inline text)</label>
+    <textarea name="system_prompt" rows="4" style="width:100%"
+      >{esc(node.get("system_prompt") or "")}</textarea></p>
+    <p><label class="dim">Instructions</label>
+    <textarea name="instructions" rows="6" style="width:100%"
+      >{esc(node.get("instructions") or "")}</textarea></p>
+    <div class="row">
+      <label class="dim">Save answer as
+        <input name="save_as" value="{esc(node.get("save_as") or "")}"></label>
+      <label class="dim">Fallback next
+        <select name="fallback_next"
+          >{options(str(node.get("fallback_next") or ""))}</select></label>
+      <button class="primary">Save node</button>
+    </div>"""
+        extra = (f'<p class="dim">Attached documents: {esc(docs)}</p>'
+                 f'<p class="row">{badges}</p>')
+    elif kind == "message":
+        primary = str((node.get("next_node_ids") or [""])[0])
+        fields = f"""
+    <p><label class="dim">Template</label>
+    <textarea name="template" rows="4" style="width:100%"
+      >{esc(node.get("template") or "")}</textarea></p>
+    <div class="row">
+      <label class="dim">Next
+        <select name="next_node_id">{options(primary)}</select></label>
+      <label class="dim">Fallback when unset
+        <select name="fallback_next"
+          >{options(str(node.get("fallback_next") or ""))}</select></label>
+      <button class="primary">Save node</button>
+    </div>"""
+        extra = ('<p class="dim">A missing variable renders a visible '
+                 "template error and routes to the fallback.</p>")
+    elif kind == "verify":
+        fields = f"""
+    <div class="row">
+      <label class="dim">On match
+        <select name="match_next"
+          >{options(str(node.get("match_next") or ""))}</select></label>
+      <label class="dim">On mismatch
+        <select name="mismatch_next"
+          >{options(str(node.get("mismatch_next") or ""))}</select></label>
+      <button class="primary">Save node</button>
+    </div>"""
+        extra = ('<p class="dim">The verifier checks against the attached '
+                 "data model, never the prompt.</p>")
+    else:
+        fields = ('<p class="dim">End nodes only finish the run - '
+                  "nothing to edit.</p>")
+    return f"""
+<div class="panel" id="node-panel">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">{esc(node_id)}</h2>
+    <span class="badge">{esc(kind)}</span>
+  </div>
+  {msg}{err}
+  {form_open}{fields}
+  </form>
+  {extra}
+</div>"""
+
+
 def flow_page(cfg: dict, errors: list[str] | None = None,
               mode: str = "use") -> str:
     node_ids = [n["node_id"] for n in cfg.get("nodes", [])]
@@ -665,7 +872,7 @@ def flow_page(cfg: dict, errors: list[str] | None = None,
             f'{" <span class=badge>start</span>" if n["node_id"] == cfg.get("start_node_id") else ""}</td>'
             f"<td>{esc(kind)}</td><td>{' '.join(conns)} {fb_html}</td></tr>"
         )
-    diagram = esc(mermaid_diagram(cfg))
+    diagram = flow_svg(cfg)
     return page(
         "Flow editor",
         f"""
@@ -688,14 +895,15 @@ def flow_page(cfg: dict, errors: list[str] | None = None,
 {"".join(rows)}
 </table>
 <h2>Diagram</h2>
-<pre class="mermaid" id="flowdiag">{diagram}</pre>
-<script src="/static/mermaid.min.js"></script>
-<script>
-  mermaid.initialize({{ startOnLoad: true, theme: "dark" }});
-  document.body.addEventListener("htmx:afterSwap", function () {{
-    mermaid.run({{ query: "#flowdiag" }});
-  }});
-</script>""",
+<p class="dim">Click a node to open its edit form in the panel beside the
+diagram; saving refreshes this diagram. Connections still use the form above.</p>
+<div class="flow-layout">
+  <div class="panel" id="diagram" hx-get="/flow/diagram"
+       hx-trigger="refresh-diagram from:body" hx-swap="innerHTML">{diagram}</div>
+  <div id="node-panel" class="panel">
+    <span class="dim">Click a node in the diagram to edit it.</span>
+  </div>
+</div>""",
         active="flow", mode=mode,
     )
 

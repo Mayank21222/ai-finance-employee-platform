@@ -609,6 +609,66 @@ def flow_remove_connection(source: str = Form(...),
     return RedirectResponse("/flow", status_code=303)
 
 
+@app.get("/flow/diagram", response_class=HTMLResponse, include_in_schema=False)
+def flow_diagram() -> str:
+    """The SVG fragment the diagram panel re-fetches after a node save."""
+    return html.flow_svg(flowcfg.load_cfg())
+
+
+@app.get("/flow/nodes/{node_id}", response_class=HTMLResponse,
+         include_in_schema=False)
+def flow_node_form(node_id: str) -> Response:
+    cfg = flowcfg.load_cfg()
+    found = any(str(n.get("node_id")) == node_id for n in cfg.get("nodes", []))
+    return HTMLResponse(html.node_edit_panel(cfg, node_id),
+                        status_code=200 if found else 404)
+
+
+@app.post("/flow/nodes/{node_id}", response_class=HTMLResponse,
+          include_in_schema=False)
+def flow_node_save(node_id: str,
+                   system_prompt: str = Form(""),
+                   instructions: str = Form(""),
+                   save_as: str = Form(""),
+                   fallback_next: str = Form(""),
+                   template: str = Form(""),
+                   next_node_id: str = Form(""),
+                   match_next: str = Form(""),
+                   mismatch_next: str = Form("")) -> Response:
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if str(n.get("node_id")) == node_id), None)
+    if node is None:
+        return HTMLResponse(html.node_edit_panel(cfg, node_id),
+                            status_code=404)
+    kind = node.get("type")
+    if kind == "agent":
+        node["system_prompt"] = system_prompt
+        node["instructions"] = instructions
+        node["save_as"] = save_as
+        node["fallback_next"] = fallback_next
+    elif kind == "message":
+        node["template"] = template
+        if next_node_id:
+            node["next_node_ids"] = [next_node_id]
+        node["fallback_next"] = fallback_next
+    elif kind == "verify":
+        node["match_next"] = match_next
+        node["mismatch_next"] = mismatch_next
+    else:
+        return HTMLResponse(html.node_edit_panel(
+            cfg, node_id, message="End nodes have nothing to edit."))
+    errors = flowcfg.save_cfg(cfg)  # validate first: bad edits never persist
+    if errors:
+        return HTMLResponse(html.node_edit_panel(cfg, node_id,
+                                                 error=errors[0]),
+                            status_code=400)
+    response = HTMLResponse(html.node_edit_panel(cfg, node_id,
+                                                 message="Saved."))
+    response.headers["HX-Trigger"] = "refresh-diagram"
+    return response
+
+
 # --- agents editor ---------------------------------------------------------
 
 

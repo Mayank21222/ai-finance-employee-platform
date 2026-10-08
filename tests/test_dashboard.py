@@ -257,7 +257,10 @@ def test_all_nav_pages_render():
         assert resp.status_code == 200, path
         assert marker in resp.text, path
     flow = client.get("/flow").text
-    assert "mermaid.min.js" in flow and "flowchart LR" in flow
+    # Phase 4 replaced the static Mermaid render with a clickable SVG:
+    # every node shape carries hx-get pointing at its edit form panel.
+    assert "<svg" in flow and 'hx-get="/flow/nodes/' in flow
+    assert 'id="node-panel"' in flow
     assert 'hx-post="/flow/validate"' in flow
 
 

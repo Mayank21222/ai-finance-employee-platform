@@ -256,3 +256,62 @@ def test_field_level_permission_rejects_unauthorized_write():
 
     # Session variables that are not model fields stay unrestricted.
     assert write_permission("classifier", "task_type") == ""
+
+def test_visual_flow_editor_clickable_nodes_and_save():
+    """Mandated Phase 4 test: the visual flow editor - clicking a node in the
+    server-generated SVG swaps its edit form into the panel beside the
+    diagram, and saving updates the config and re-renders the diagram."""
+    from ai_operator.graph import DEFAULT_FLOW_PATH
+
+    original = DEFAULT_FLOW_PATH.read_text()
+    try:
+        # The page carries the clickable SVG and the swap target panel.
+        flow = client.get("/flow").text
+        assert 'class="fnode"' in flow
+        assert 'hx-get="/flow/nodes/ap_agent"' in flow
+        assert 'hx-target="#node-panel"' in flow
+        assert 'id="diagram"' in flow
+        assert "mermaid.min.js" not in flow  # replaced, per Improvements.md
+
+        # The diagram fragment is generated from config: every node is a
+        # clickable shape, the start badge and edge labels are present.
+        resp = client.get("/flow/diagram")
+        assert resp.status_code == 200
+        for nid in ("classifier", "ap_agent", "reminder_agent",
+                    "reminder_message", "check_invoice", "report"):
+            assert f'hx-get="/flow/nodes/{nid}"' in resp.text, nid
+        assert ">start</text>" in resp.text
+        assert "fallback" in resp.text and "mismatch" in resp.text
+
+        # Clicking a node returns its edit form with prompt, instructions
+        # and the registry-backed tool toggles.
+        resp = client.get("/flow/nodes/ap_agent")
+        assert resp.status_code == 200
+        assert 'id="node-panel"' in resp.text
+        assert "<textarea" in resp.text
+        assert 'hx-post="/agents/ap_agent/tools/' in resp.text
+        assert client.get("/flow/nodes/no_such_node").status_code == 404
+
+        # Saving edits the config and asks htmx to refresh the diagram.
+        resp = client.post("/flow/nodes/ap_agent", data={
+            "system_prompt": "prompts/agent_ap.md",
+            "instructions": "PANEL EDIT: enter invoices carefully",
+            "save_as": "ap_answer", "fallback_next": "report"})
+        assert resp.status_code == 200
+        assert resp.headers["hx-trigger"] == "refresh-diagram"
+        assert "PANEL EDIT: enter invoices carefully" in resp.text
+        cfg = json.loads(DEFAULT_FLOW_PATH.read_text())
+        ap = next(n for n in cfg["nodes"] if n["node_id"] == "ap_agent")
+        assert ap["instructions"] == "PANEL EDIT: enter invoices carefully"
+
+        # An invalid edit is refused with the validator message and the
+        # config file stays untouched (validate-before-save).
+        before = DEFAULT_FLOW_PATH.read_text()
+        resp = client.post("/flow/nodes/classifier", data={
+            "instructions": "x", "save_as": "", "fallback_next": "report"})
+        assert resp.status_code == 400  # routes require save_as
+        assert "save_as" in resp.text
+        assert DEFAULT_FLOW_PATH.read_text() == before
+    finally:
+        if DEFAULT_FLOW_PATH.read_text() != original:
+            DEFAULT_FLOW_PATH.write_text(original)
