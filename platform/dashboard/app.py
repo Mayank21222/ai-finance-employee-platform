@@ -364,6 +364,61 @@ def schedules_delete(schedule_id: int):
     return RedirectResponse("/schedules", status_code=303)
 
 
+# --- skills (Phase 5) -------------------------------------------------------
+
+
+def _skill_users() -> dict[str, list[str]]:
+    """Map skill name -> agent node ids that attach it in the current flow."""
+    users: dict[str, list[str]] = {}
+    try:
+        cfg = flowcfg.load_cfg()
+    except Exception:
+        return users
+    for node in cfg.get("nodes", []):
+        if node.get("type") != "agent":
+            continue
+        for name in node.get("skills") or []:
+            users.setdefault(str(name), []).append(str(node.get("node_id")))
+    return users
+
+
+@app.get("/skills", response_class=HTMLResponse, include_in_schema=False)
+def skills_page(request: Request) -> str:
+    return html.skills_page(db.list_skills(), _skill_users(),
+                            mode=_mode(request))
+
+
+@app.post("/skills", response_class=HTMLResponse, include_in_schema=False)
+def skills_add(name: str = Form(...), description: str = Form(""),
+               body: str = Form(...)):
+    name = name.strip()
+    if not name:
+        return html.skills_page(db.list_skills(), _skill_users(),
+                                error="A skill needs a name.")
+    if db.get_skill_by_name(name):
+        return html.skills_page(db.list_skills(), _skill_users(),
+                                error=f"A skill named '{name}' already exists.")
+    if not body.strip():
+        return html.skills_page(db.list_skills(), _skill_users(),
+                                error="A skill needs a body.")
+    db.add_skill(name, description, body)
+    return html.skills_page(db.list_skills(), _skill_users(),
+                            message=f"Added skill '{name}'.")
+
+
+@app.post("/skills/{name}/delete", response_class=HTMLResponse,
+          include_in_schema=False)
+def skills_delete(name: str):
+    users = _skill_users()
+    if users.get(name):
+        return html.skills_page(
+            db.list_skills(), users,
+            error=f"Skill '{name}' is attached to {', '.join(users[name])}; "
+                  "detach it in the flow editor first.")
+    db.delete_skill(name)
+    return RedirectResponse("/skills", status_code=303)
+
+
 @app.get("/runs/{run_id}/trace", include_in_schema=False)
 def run_trace(run_id: str):
     path = RUNS_ROOT / run_id / "trace.jsonl"
@@ -833,7 +888,8 @@ def flow_node_save(node_id: str,
                    template: str = Form(""),
                    next_node_id: str = Form(""),
                    match_next: str = Form(""),
-                   mismatch_next: str = Form("")) -> Response:
+                   mismatch_next: str = Form(""),
+                   skills: list[str] = Form([])) -> Response:
     cfg = flowcfg.load_cfg()
     node = next((n for n in cfg.get("nodes", [])
                  if str(n.get("node_id")) == node_id), None)
@@ -847,6 +903,9 @@ def flow_node_save(node_id: str,
         node["instructions"] = instructions
         node["save_as"] = save_as
         node["fallback_next"] = fallback_next
+        # Phase 5: attaching/detaching skills is a normal config save, so it
+        # creates an agent version row through the same path below.
+        node["skills"] = skills
     elif kind == "message":
         node["template"] = template
         if next_node_id:

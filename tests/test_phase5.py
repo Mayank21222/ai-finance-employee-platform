@@ -19,8 +19,12 @@ os.environ["STUB_MODEL"] = "1"
 from ai_operator.graph import DEFAULT_FLOW_PATH  # noqa: E402
 from ai_operator.llm import (estimated_cost_usd, get_client,  # noqa: E402
                              take_usage)
+from ai_operator.state import INITIAL_STATE_KEYS  # noqa: E402
 from platform.dashboard import db, runner, scheduler  # noqa: E402
 from platform.dashboard import app as dashapp  # noqa: E402
+from platform.flow.compiler import compile_flow  # noqa: E402
+from platform.flow.models import Flow  # noqa: E402
+from platform.flow.validator import validate  # noqa: E402
 
 RUNS_ROOT = dashapp.RUNS_ROOT
 client = TestClient(dashapp.app)
@@ -225,3 +229,77 @@ def test_due_schedule_with_active_run_is_recorded_skipped(monkeypatch):
         assert "active" in (skipped["skipped_reason"] or "")
     finally:
         db.delete_schedule(sid)
+
+# --- P5-4 reusable agent skills ---------------------------------------------
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.systems: list[str] = []
+        self.users: list[str] = []
+
+    def complete(self, system: str, user: str) -> str:
+        self.systems.append(system)
+        self.users.append(user)
+        if '"understanding":' in system:
+            return json.dumps({"understanding": "u", "plan": "p"})
+        return json.dumps({
+            "thought": "finish", "action_type": "finish", "tool_name": None,
+            "tool_args": {}, "plan_update": None, "expected_outcome": "ok",
+        })
+
+
+def test_attached_skill_compiles_between_persona_and_data_model():
+    skill = "Vendor Etiquette"
+    db.add_skill("Vendor Etiquette", "how to talk to vendors",
+                 "SKILLBODY-ETIQUETTE: always cite the PO reference.")
+    try:
+        flow = Flow.model_validate({
+            "start_node_id": "a1",
+            "session_context": {"tenant": "acme", "currency": "INR",
+                                "approval_threshold": 50000.0,
+                                "user_role": "finance_operator"},
+            "nodes": [
+                {"type": "agent", "node_id": "a1",
+                 "system_prompt": "PERSONA-TEXT", "skills": ["Vendor Etiquette"],
+                 "instructions": "INSTR-ABC", "data_model": "Invoice",
+                 "fallback_next": "finish_line"},
+                {"type": "end", "node_id": "finish_line"},
+            ],
+        })
+        assert validate(flow) == []
+        rec = _RecordingClient()
+        compile_flow(flow, rec).compile().invoke({
+            "task": "do a thing", "run_id": "test_skills",
+            **INITIAL_STATE_KEYS,
+        })
+        system = next(s for s in rec.systems if "SKILLBODY-ETIQUETTE" in s)
+        i_persona = system.index("PERSONA-TEXT")
+        i_skill = system.index("[SKILL: Vendor Etiquette]")
+        i_model = system.index("== Data model: Invoice ==")
+        assert i_persona < i_skill < i_model  # below persona, above data model
+        # Instructions stay in the USER prompt (existing contract is intact).
+        user = next(u for u in rec.users if "[AGENT INSTRUCTIONS]" in u)
+        assert "INSTR-ABC" in user
+    finally:
+        db.delete_skill("Vendor Etiquette")
+
+
+def test_missing_skill_is_a_named_validation_error():
+    flow = Flow.model_validate({
+        "start_node_id": "a1",
+        "session_context": {"tenant": "acme", "currency": "INR",
+                            "approval_threshold": 50000.0,
+                            "user_role": "finance_operator"},
+        "nodes": [
+            {"type": "agent", "node_id": "a1", "skills": ["ghost_skill"],
+             "fallback_next": "finish_line"},
+            {"type": "end", "node_id": "finish_line"},
+        ],
+    })
+    errors = validate(flow)
+    assert any("ghost_skill" in e and "does not exist" in e for e in errors)
+    import pytest
+
+    with pytest.raises(ValueError, match="ghost_skill"):
+        compile_flow(flow, _RecordingClient())

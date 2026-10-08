@@ -91,6 +91,13 @@ def init_db() -> None:
                 last_run_id TEXT,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS skills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -367,6 +374,37 @@ def set_run_versions(run_id: str, versions: dict[str, int]) -> None:
         con.execute(
             "UPDATE runs SET agent_versions_used = ? WHERE run_id = ?",
             (json.dumps(versions), run_id))
+
+
+# --- reusable skills (Phase 5) ----------------------------------------------
+
+
+def list_skills() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM skills ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_skill_by_name(name: str) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM skills WHERE name = ?",
+                          (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_skill(name: str, description: str, body: str) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO skills (name, description, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (name.strip(), description.strip(), body, time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def delete_skill(name: str) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM skills WHERE name = ?", (name,))
 
 
 # --- schedules (Phase 5) ----------------------------------------------------

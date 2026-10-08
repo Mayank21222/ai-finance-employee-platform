@@ -37,6 +37,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCUMENT_CHAR_LIMIT = 4000
 
 
+def _skill_block(skill_names: list[str]) -> str:
+    """Phase 5: labelled bodies for an agent's attached skills.
+
+    Raises a clear ValueError when a name cannot be found at compile time
+    (the validator normally catches this first; this is defense in depth and
+    mirrors the tools-enabled check's failure mode).
+    """
+    if not skill_names:
+        return ""
+    from platform.dashboard import db
+
+    parts = []
+    for name in skill_names:
+        skill = db.get_skill_by_name(name)
+        if skill is None:
+            raise ValueError(
+                f"Agent references skill '{name}', which does not exist "
+                "in the skills library."
+            )
+        body = (skill.get("body") or "").strip()
+        parts.append(f"[SKILL: {skill['name']}]\n{body}")
+    return "\n\n".join(parts)
+
+
 def compile_flow(flow: Flow, client: Any) -> StateGraph:
     """Validate the flow, then build the StateGraph (not yet compiled)."""
     errors = validate(flow)
@@ -118,6 +142,11 @@ def _add_agent(
     documents = _load_documents(node.documents)
     allowed_tools = tuple(node.tools_enabled)
     instructions = node.instructions or None
+    # Phase 5: attached skills are injected below the agent's own text and
+    # above the data model block, each labelled with its skill name.
+    skill_block = _skill_block(node.skills)
+    if skill_block:
+        persona = f"{persona or ''}\n{skill_block}".strip()
     # Phase 4: the attached data model's field list becomes part of the
     # agent's context so field names and types never have to be hardcoded
     # in a prompt again.

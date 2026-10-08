@@ -50,6 +50,13 @@ class AgentNode(BaseModel):
     instructions and registers field-level write/read permissions for the
     variable write path.
     """
+    skills: list[str] = Field(default_factory=list)
+    """Phase 5: names of reusable platform skills attached to this agent.
+
+    The compiler loads each skill's body from the dashboard database and
+    appends it below the agent's own instructions and above the data model
+    block, each labelled with the skill name.
+    """
 
 
 class MessageNode(BaseModel):

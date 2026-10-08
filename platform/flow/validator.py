@@ -105,6 +105,36 @@ def validate(flow: Flow) -> list[str]:
 
     errors.extend(_template_variable_errors(flow, node_map))
     errors.extend(_connector_errors(flow))
+    errors.extend(_skill_errors(flow))
+    return errors
+
+
+def _skill_errors(flow: Flow) -> list[str]:
+    """Phase 5: every skill an agent attaches must exist in the library.
+
+    The DB is imported lazily so the validator stays importable (and usable
+    in CLI flows) without a dashboard database; if the table is missing we
+    treat the library as empty and report the reference as unknown.
+    """
+    wanted = {name for node in flow.nodes if isinstance(node, AgentNode)
+              for name in (node.skills or [])}
+    if not wanted:
+        return []
+    try:
+        from platform.dashboard import db
+
+        known = {s["name"] for s in db.list_skills()}
+    except Exception:
+        known = set()
+    errors = []
+    for node in flow.nodes:
+        if isinstance(node, AgentNode):
+            for name in (node.skills or []):
+                if name not in known:
+                    errors.append(
+                        f"Agent node '{node.node_id}' references skill "
+                        f"'{name}', which does not exist in the skills library."
+                    )
     return errors
 
 

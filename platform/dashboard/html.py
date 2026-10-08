@@ -14,6 +14,7 @@ NAV = [
     ("models", "/models", "Data models", "edit"),
     ("connectors", "/connectors", "Connectors", "edit"),
     ("schedules", "/schedules", "Schedules", "edit"),
+    ("skills", "/skills", "Skills", "edit"),
     ("sessions", "/sessions", "Sessions", "edit"),
     ("agents", "/agents", "Agents", "edit"),
     ("flow", "/flow", "Flow editor", "edit"),
@@ -834,6 +835,16 @@ def flow_svg(cfg: dict) -> str:
     return "".join(out)
 
 
+def _skill_names() -> list[str]:
+    """Names of skills available for attachment (lazy DB read; [] on error)."""
+    try:
+        from platform.dashboard import db
+
+        return [s["name"] for s in db.list_skills()]
+    except Exception:
+        return []
+
+
 def node_edit_panel(cfg: dict, node_id: str, message: str = "",
                     error: str = "") -> str:
     """The click-to-edit form for one node, swapped into #node-panel."""
@@ -861,6 +872,20 @@ def node_edit_panel(cfg: dict, node_id: str, message: str = "",
             tool_badge(node_id, t, t in (node.get("tools_enabled") or []))
             for t in _registry_names())
         docs = ", ".join(node.get("documents") or []) or "none"
+        known_skills = _skill_names()
+        attached = list(node.get("skills") or [])
+        if known_skills:
+            boxes = "".join(
+                f'<label class="dim"><input type="checkbox" name="skills" '
+                f'value="{esc(s)}" {"checked" if s in attached else ""}>'
+                f"{esc(s)}</label>"
+                for s in known_skills
+            )
+            skill_html = ('<p><label class="dim">Skills (attach/detach)'
+                          f"</label></p><p class='row'>{boxes}</p>")
+        else:
+            skill_html = ('<p class="dim">No skills in the library yet - add '
+                          "some on the Skills page to attach them here.</p>")
         fields = f"""
     <p><label class="dim">System prompt (file path or inline text)</label>
     <textarea name="system_prompt" rows="4" style="width:100%"
@@ -868,6 +893,7 @@ def node_edit_panel(cfg: dict, node_id: str, message: str = "",
     <p><label class="dim">Instructions</label>
     <textarea name="instructions" rows="6" style="width:100%"
       >{esc(node.get("instructions") or "")}</textarea></p>
+    {skill_html}
     <div class="row">
       <label class="dim">Save answer as
         <input name="save_as" value="{esc(node.get("save_as") or "")}"></label>
@@ -1543,6 +1569,56 @@ a skipped run and retried at the next check.</p>
   <button class="primary">Add schedule</button>
 </form>""",
         active="schedules", mode=mode,
+    )
+
+
+def skills_page(skills: list[dict], users: dict[str, list[str]],
+                error: str = "", message: str = "", mode: str = "use") -> str:
+    """Phase 5: reusable skills and which agents currently attach each one."""
+    rows = ""
+    for s in skills:
+        name = str(s["name"])
+        used_by = users.get(name) or []
+        used = ", ".join(used_by) if used_by else "—"
+        body = (s.get("body") or "")
+        preview = esc(body[:300]) + ("…" if len(body) > 300 else "")
+        rows += (
+            f'<tr><td class="mono"><strong>{esc(name)}</strong></td>'
+            f'<td>{esc(s.get("description") or "")}</td>'
+            f'<td class="dim">{esc(used)}</td>'
+            f'<td><details><summary class="dim">body</summary>'
+            f'<pre>{preview}</pre></details></td>'
+            f'<td><form method="post" action="/skills/{esc(name)}/delete" '
+            f'onsubmit="return confirm(\'Delete skill {esc(name)}?\')">'
+            f"<button>Delete</button></form></td></tr>"
+        )
+    if not rows:
+        rows = '<tr><td colspan="5" class="dim">No skills yet.</td></tr>'
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Skills",
+        f"""
+<h1>Skills</h1>
+<p class="dim">Reusable instruction blocks, global to the platform. Attach
+them to an agent in the flow editor; the compiler appends each skill's body
+below the agent's instructions and above its data model block.</p>
+{msg}{err}
+<table>
+<tr><th>Name</th><th>Description</th><th>Used by</th><th>Body</th><th></th>
+</tr>
+{rows}
+</table>
+<h2>New skill</h2>
+<form method="post" action="/skills" class="row">
+  <input name="name" placeholder="skill name" required
+         pattern="[A-Za-z0-9_-]+" style="flex:1">
+  <input name="description" placeholder="one-line description" style="flex:2">
+  <textarea name="body" rows="3" placeholder="instruction content"
+            required style="flex:4"></textarea>
+  <button class="primary">Add skill</button>
+</form>""",
+        active="skills", mode=mode,
     )
 
 
