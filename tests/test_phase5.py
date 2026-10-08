@@ -5,7 +5,9 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -15,8 +17,9 @@ os.environ.setdefault("DASH_DB",
 os.environ["STUB_MODEL"] = "1"
 
 from ai_operator.graph import DEFAULT_FLOW_PATH  # noqa: E402
-from ai_operator.llm import estimated_cost_usd, get_client, take_usage  # noqa: E402
-from platform.dashboard import db, runner  # noqa: E402
+from ai_operator.llm import (estimated_cost_usd, get_client,  # noqa: E402
+                             take_usage)
+from platform.dashboard import db, runner, scheduler  # noqa: E402
 from platform.dashboard import app as dashapp  # noqa: E402
 
 RUNS_ROOT = dashapp.RUNS_ROOT
@@ -162,3 +165,63 @@ def test_run_records_token_usage_in_report_and_history(tmp_path):
     finally:
         os.environ.pop("COMP_OPS_FLOW", None)
         os.environ.pop("COMP_OPS_SKIP_APP", None)
+
+
+# --- P5-3 scheduled background runs -----------------------------------------
+
+
+def test_schedule_parse_and_due_window():
+    assert scheduler.parse_cron("daily 09:30") == ("daily", None, 9, 30)
+    assert scheduler.parse_cron("weekly mon 09:30") == ("weekly", 0, 9, 30)
+    assert scheduler.parse_cron("every 5 min") is None
+    assert scheduler.parse_cron("daily 99:00") is None
+    sched = {"cron": "daily 09:30", "tz_offset": 0, "last_run_at": None}
+    due = datetime(2026, 1, 5, 9, 30, 20, tzinfo=timezone.utc).timestamp()
+    late = datetime(2026, 1, 5, 9, 31, 20, tzinfo=timezone.utc).timestamp()
+    assert scheduler.is_due(sched, due)
+    assert not scheduler.is_due(sched, late)  # outside the minute window
+    # weekly only on the named day (2026-01-05 is a Monday).
+    weekly = {"cron": "weekly tue 09:30", "tz_offset": 0, "last_run_at": None}
+    assert not scheduler.is_due(weekly, due)
+
+
+def test_due_schedule_fires_a_run_with_source_schedule():
+    sid = db.add_schedule(session_id=1, task="scheduled report",
+                          cron="daily 09:30", tz_offset=0.0)
+    run_id = "run_test_sched_fire"
+    try:
+        def fake_start(task, session_id, source="manual", schedule_id=None):
+            db.record_run(run_id, session_id, task, source=source,
+                          schedule_id=schedule_id)
+            return SimpleNamespace(run_id=run_id)
+
+        due = datetime(2026, 1, 5, 9, 30, 10, tzinfo=timezone.utc).timestamp()
+        fired = scheduler.check_due(now=due, start=fake_start)
+        assert run_id in fired
+        row = db.get_run(run_id)
+        assert row["source"] == "schedule"
+        assert row["schedule_id"] == sid
+        assert db.get_schedule(sid)["last_run_id"] == run_id
+    finally:
+        db.delete_schedule(sid)
+
+
+def test_due_schedule_with_active_run_is_recorded_skipped(monkeypatch):
+    sid = db.add_schedule(session_id=1, task="scheduled report",
+                          cron="daily 10:15", tz_offset=0.0)
+    try:
+        monkeypatch.setattr(scheduler.runner, "active",
+                            lambda: SimpleNamespace(run_id="busy"))
+        called = []
+        due = datetime(2026, 1, 5, 10, 15, 5, tzinfo=timezone.utc).timestamp()
+        fired = scheduler.check_due(
+            now=due, start=lambda *a, **k: called.append(a) or None)
+        assert called == []  # never started while another run was active
+        assert fired, "the skip should still be reported"
+        skipped = db.get_run(fired[0])
+        assert skipped["state"] == "skipped"
+        assert skipped["source"] == "schedule"
+        assert skipped["schedule_id"] == sid
+        assert "active" in (skipped["skipped_reason"] or "")
+    finally:
+        db.delete_schedule(sid)

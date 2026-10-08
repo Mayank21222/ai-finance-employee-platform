@@ -21,7 +21,7 @@ from ai_operator.graph import DEFAULT_FLOW_PATH
 from ai_operator.permissions import PermissionLevel
 from ai_operator.tools import connectors as connector_tools
 from ai_operator.tracing import RUNS_ROOT
-from platform.dashboard import db, flowcfg, html, runner
+from platform.dashboard import db, flowcfg, html, runner, scheduler
 from platform.flow.models import Flow, load_flow
 from platform.flow.validator import SUPPORTED_HTTP_METHODS, validate
 
@@ -42,10 +42,13 @@ def _startup() -> None:
     flipped = runner.reconcile()
     if flipped:
         print(f"[dashboard] interrupted (orphaned) runs: {flipped}")
+    # Phase 5: start the background scheduler (checks every 60 seconds).
+    scheduler.start()
 
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
+    scheduler.stop()
     runner.shutdown()
 
 
@@ -324,6 +327,41 @@ def history_page(request: Request) -> str:
     for row in rows:  # Phase 5: attach estimated token spend for display
         row["tokens"] = (_report(row["run_id"]) or {}).get("tokens")
     return html.history_page(rows, mode=_mode(request))
+
+
+# --- schedules (Phase 5) ----------------------------------------------------
+
+
+@app.get("/schedules", response_class=HTMLResponse, include_in_schema=False)
+def schedules_page(request: Request) -> str:
+    return html.schedules_page(db.list_schedules(), db.list_sessions(),
+                               mode=_mode(request))
+
+
+@app.post("/schedules", response_class=HTMLResponse, include_in_schema=False)
+def schedules_add(session_id: int = Form(...), task: str = Form(...),
+                  cron: str = Form(...), tz_offset: float = Form(0.0)):
+    if scheduler.parse_cron(cron) is None:
+        return html.schedules_page(
+            db.list_schedules(), db.list_sessions(),
+            error="cron must be 'daily HH:MM' or 'weekly mon HH:MM'.")
+    db.add_schedule(session_id, task.strip(), cron.strip().lower(), tz_offset)
+    return html.schedules_page(db.list_schedules(), db.list_sessions(),
+                               message="Schedule added.")
+
+
+@app.post("/schedules/{schedule_id}/toggle", include_in_schema=False)
+def schedules_toggle(schedule_id: int):
+    row = db.get_schedule(schedule_id)
+    if row is not None:
+        db.set_schedule_enabled(schedule_id, not bool(row["enabled"]))
+    return RedirectResponse("/schedules", status_code=303)
+
+
+@app.post("/schedules/{schedule_id}/delete", include_in_schema=False)
+def schedules_delete(schedule_id: int):
+    db.delete_schedule(schedule_id)
+    return RedirectResponse("/schedules", status_code=303)
 
 
 @app.get("/runs/{run_id}/trace", include_in_schema=False)

@@ -71,6 +71,11 @@ def get(run_id: str) -> RunHandle | None:
     return _RUNS.get(run_id)
 
 
+def new_run_id() -> str:
+    """A dashboard run id; the scheduler reuses this for skipped records."""
+    return datetime.now().strftime("run_%Y%m%d_%H%M%S-") + uuid4().hex[:6]
+
+
 def active() -> RunHandle | None:
     with _ACTIVE_LOCK:
         for h in _RUNS.values():
@@ -80,18 +85,20 @@ def active() -> RunHandle | None:
 
 
 def start_run(task: str, session_id: int, failures: str = "",
-              fresh: bool = False, app_url: str | None = None) -> RunHandle:
+              fresh: bool = False, app_url: str | None = None,
+              source: str = "manual",
+              schedule_id: int | None = None) -> RunHandle:
     if active() is not None:
         raise RuntimeError("Another run is already active; wait for it to finish.")
     session = db.get_session(session_id)
     if session is None:
         raise RuntimeError(f"No session with id {session_id}.")
-    run_id = (datetime.now().strftime("run_%Y%m%d_%H%M%S-")
-              + uuid4().hex[:6])
+    run_id = new_run_id()
     handle = RunHandle(run_id=run_id, task=task, session_id=session_id)
     with _ACTIVE_LOCK:
         _RUNS[run_id] = handle
-    db.record_run(run_id, session_id, task)
+    db.record_run(run_id, session_id, task, source=source,
+                  schedule_id=schedule_id)
     _record_agent_versions(run_id)
     handle.thread = threading.Thread(
         target=_worker, args=(handle, session, failures, fresh, app_url),

@@ -13,6 +13,7 @@ NAV = [
     ("audit", "/audit", "Audit trail", "run"),
     ("models", "/models", "Data models", "edit"),
     ("connectors", "/connectors", "Connectors", "edit"),
+    ("schedules", "/schedules", "Schedules", "edit"),
     ("sessions", "/sessions", "Sessions", "edit"),
     ("agents", "/agents", "Agents", "edit"),
     ("flow", "/flow", "Flow editor", "edit"),
@@ -262,7 +263,7 @@ def history_page(runs: list[dict], mode: str = "use") -> str:
             f'<tr><td class="mono"><a href="/runs/{esc(r["run_id"])}" '
             f'style="color:var(--acc)">{esc(r["run_id"])}</a></td>'
             f'<td><span class="badge {esc(state)}">{esc(state)}</span></td>'
-            f'<td>{esc(r["task"] or "")}</td>'
+            f'<td>{esc(r["task"] or "")}<div class="dim">{esc(_source_cell(r))}</div></td>'
             f'<td>{esc(r["tenant"] or "-")} (#{r["session_id"] or "-"})</td>'
             f'<td class="dim">{esc(started)}</td>'
             f'<td class="dim">{esc(finished)}</td>'
@@ -287,6 +288,15 @@ or cancel).</p>
 """ + rows + "</table>",
         active="history", mode=mode,
     )
+
+
+def _source_cell(run: dict) -> str:
+    """Phase 5: manual vs scheduled, and why a scheduled run was skipped."""
+    source = str(run.get("source") or "manual")
+    parts = [f"source: {source}"]
+    if run.get("skipped_reason"):
+        parts.append(f"skipped: {run['skipped_reason']}")
+    return " · ".join(parts)
 
 
 def _tokens_cell(run: dict) -> str:
@@ -1465,6 +1475,74 @@ Agents page and is available to agents from the next run.</p>
   <button class="primary">Create connector</button>
 </form>""",
         active="connectors", mode=mode,
+    )
+
+
+def schedules_page(schedules: list[dict], sessions: list[dict],
+                   error: str = "", message: str = "",
+                   mode: str = "use") -> str:
+    """Phase 5: scheduled background runs.
+
+    cron is the tiny format 'daily HH:MM' or 'weekly mon HH:MM', evaluated at
+    the schedule's timezone offset from UTC.
+    """
+    by_id = {s["id"]: s for s in sessions}
+    rows = []
+    for s in schedules:
+        sess = by_id.get(s["session_id"])
+        sess_txt = (f'#{s["session_id"]} {esc(sess["tenant"])}'
+                    if sess else f'#{s["session_id"]}')
+        enabled = bool(s.get("enabled"))
+        toggle_label = "Disable" if enabled else "Enable"
+        last = (time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(s["last_run_at"]))
+                if s.get("last_run_at") else "-")
+        rows.append(
+            f'<tr><td class="mono">{esc(s["cron"])}</td>'
+            f'<td>{sess_txt}</td><td>{esc(s["task"])}</td>'
+            f'<td><span class="badge {"completed" if enabled else "interrupted"}">'
+            f'{"enabled" if enabled else "disabled"}</span></td>'
+            f'<td class="dim">{esc(last)}</td>'
+            f'<td class="mono">{esc(s.get("last_run_id") or "-")}</td>'
+            f'<td class="row">'
+            f'<form method="post" action="/schedules/{s["id"]}/toggle">'
+            f'<button>{toggle_label}</button></form>'
+            f'<form method="post" action="/schedules/{s["id"]}/delete" '
+            f'onsubmit="return confirm(\'Delete schedule {s["id"]}?\')">'
+            f'<button>Delete</button></form></td></tr>'
+        )
+    if not rows:
+        rows = ('<tr><td colspan="7" class="dim">No schedules yet.</td></tr>')
+    session_opts = "".join(
+        f'<option value="{s["id"]}">#{s["id"]} {esc(s["tenant"])} '
+        f'({esc(s["currency"])})</option>' for s in sessions)
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Schedules",
+        f"""
+<h1>Scheduled runs</h1>
+{msg}{err}
+<p class="dim">A background thread checks every 60 seconds. A schedule fires
+when the clock reaches the configured time (within the same minute) and has
+not already run in that window; if a run is already active it is recorded as
+a skipped run and retried at the next check.</p>
+<table>
+<tr><th>When</th><th>Session</th><th>Task</th><th>Status</th>
+<th>Last run</th><th>Last run id</th><th></th></tr>
+{"".join(rows)}
+</table>
+<h2>New schedule</h2>
+<form method="post" action="/schedules" class="row">
+  <select name="session_id">{session_opts}</select>
+  <input name="task" placeholder="task to run" required style="flex:2">
+  <input name="cron" placeholder="daily 09:30   or   weekly mon 09:30"
+         required>
+  <input name="tz_offset" type="number" step="0.5" value="5.5" style="width:90px"
+         title="timezone offset from UTC in hours">
+  <button class="primary">Add schedule</button>
+</form>""",
+        active="schedules", mode=mode,
     )
 
 

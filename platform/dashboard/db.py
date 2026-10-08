@@ -80,6 +80,17 @@ def init_db() -> None:
                 label TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                task TEXT NOT NULL,
+                cron TEXT NOT NULL,
+                tz_offset REAL NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_run_at REAL,
+                last_run_id TEXT,
+                created_at REAL NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -148,14 +159,34 @@ def delete_session(session_id: int) -> None:
         con.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
-def record_run(run_id: str, session_id: int, task: str) -> None:
+def record_run(run_id: str, session_id: int, task: str, source: str = "manual",
+               schedule_id: int | None = None) -> None:
     with connect() as con:
         con.execute(
             "INSERT OR REPLACE INTO runs (run_id, session_id, task, status, "
-            "error, created_at, finished_at, state) VALUES (?, ?, ?, ?, ?, ?, "
-            "?, ?)",
+            "error, created_at, finished_at, state, source, schedule_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run_id, session_id, task, "running", None, time.time(), None,
-             "queued"),
+             "queued", source, schedule_id),
+        )
+
+
+def record_skipped_run(run_id: str, session_id: int, task: str, reason: str,
+                       source: str = "schedule",
+                       schedule_id: int | None = None) -> None:
+    """Phase 5: a schedule that was due but could not fire.
+
+    Recorded as a finished, skipped run so the reason is visible in history
+    instead of silently dropped.
+    """
+    now = time.time()
+    with connect() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO runs (run_id, session_id, task, status, "
+            "error, created_at, finished_at, state, source, schedule_id, "
+            "skipped_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, session_id, task, "skipped", None, now, now, "skipped",
+             source, schedule_id, reason),
         )
 
 
@@ -336,3 +367,51 @@ def set_run_versions(run_id: str, versions: dict[str, int]) -> None:
         con.execute(
             "UPDATE runs SET agent_versions_used = ? WHERE run_id = ?",
             (json.dumps(versions), run_id))
+
+
+# --- schedules (Phase 5) ----------------------------------------------------
+
+
+def list_schedules() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM schedules ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_schedule(schedule_id: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM schedules WHERE id = ?",
+                          (schedule_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_schedule(session_id: int, task: str, cron: str,
+                 tz_offset: float = 0.0, enabled: bool = True) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO schedules (session_id, task, cron, tz_offset, "
+            "enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, task, cron, float(tz_offset), int(bool(enabled)),
+             time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def set_schedule_enabled(schedule_id: int, enabled: bool) -> None:
+    with connect() as con:
+        con.execute("UPDATE schedules SET enabled = ? WHERE id = ?",
+                    (int(bool(enabled)), schedule_id))
+
+
+def delete_schedule(schedule_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+
+
+def mark_schedule_run(schedule_id: int, run_id: str) -> None:
+    """Record that a schedule fired now (tracks the repeat-guard window)."""
+    with connect() as con:
+        con.execute(
+            "UPDATE schedules SET last_run_at = ?, last_run_id = ? WHERE id = ?",
+            (time.time(), run_id, schedule_id),
+        )
