@@ -44,9 +44,12 @@ def _startup() -> None:
     db.init_db()
     # Phase 4: the DB connector registry is loaded into the tool registry and
     # projected into the flow config so the next run registers those tools.
-    connector_errors = flowcfg.publish_connectors()
-    if connector_errors:
-        print(f"[dashboard] connector registry: {'; '.join(connector_errors)}")
+    # Phase 6 section 8: that loader now runs through the plugin interface
+    # (built-in "connectors" plugin) together with plugins/*.py; anything
+    # that raises is logged and skipped, never fatal.
+    from platform.dashboard import plugins
+
+    plugins.load_all()
     flipped = runner.reconcile()
     if flipped:
         print(f"[dashboard] interrupted (orphaned) runs: {flipped}")
@@ -1401,6 +1404,19 @@ def export_tenant(tenant: str):
         content=data, media_type="application/zip",
         headers={"Content-Disposition":
                  f'attachment; filename="comp_ops_{tenant}_export.zip"'})
+
+
+# --- plugins (Phase 6 section 8) --------------------------------------------
+
+
+@app.get("/plugins", response_class=HTMLResponse, include_in_schema=False)
+def plugins_page(request: Request) -> str:
+    from platform.dashboard import plugins
+
+    loaded = [p.as_dict() for p in plugins.list_plugins()]
+    if not loaded:  # startup has not run (e.g. TestClient without lifespan)
+        loaded = [p.as_dict() for p in plugins.load_all()]
+    return html.plugins_page(loaded, mode=_mode(request))
 
 
 # --- audit trail (Phase 4) --------------------------------------------------

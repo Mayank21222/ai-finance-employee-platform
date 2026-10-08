@@ -13,6 +13,7 @@ NAV = [
     ("audit", "/audit", "Audit trail", "run"),
     ("models", "/models", "Data models", "edit"),
     ("connectors", "/connectors", "Connectors", "edit"),
+    ("plugins", "/plugins", "Plugins", "edit"),
     ("schedules", "/schedules", "Schedules", "edit"),
     ("triggers", "/triggers", "Triggers", "edit"),
     ("channels", "/channels", "Channels", "edit"),
@@ -1809,6 +1810,48 @@ read-only.</p>
          required style="flex:3">
   <button class="primary">Add saved query</button>
 </form>"""
+
+
+def plugins_page(plugins: list[dict], mode: str = "use") -> str:
+    """Phase 6 section 8: read-only list of installed plugins."""
+    rows = ""
+    for p in plugins:
+        status = str(p.get("status") or "loaded")
+        provides = " ".join(
+            f'<span class="badge">{esc(item)}</span>'
+            for item in p.get("provides") or []) or '<span class="dim">-</span>'
+        error = (f'<div class="err" title="{esc(p.get("error") or "")}">'
+                 f'{esc(str(p.get("error") or "")[:200])}</div>'
+                 if p.get("error") else "")
+        rows += (
+            f'<tr><td><strong>{esc(p.get("name"))}</strong>'
+            f'<div class="dim">{esc(p.get("source") or "")}</div></td>'
+            f'<td class="mono">{esc(p.get("version") or "")}</td>'
+            f'<td>{esc(p.get("description") or "")}{error}</td>'
+            f'<td>{provides}</td>'
+            f'<td><span class="badge '
+            f'{"completed" if status == "loaded" else "interrupted"}">'
+            f'{esc(status)}</span></td></tr>')
+    if not rows:
+        rows = ('<tr><td colspan="5" class="dim">No plugins loaded '
+                '(drop a .py file into plugins/).</td></tr>')
+    return page(
+        "Plugins",
+        f"""
+<h1>Plugins</h1>
+<p class="dim">Microkernel slice: everything registers through one
+interface - a <code>MANIFEST</code> and an optional <code>register()</code>
+function in <code>plugins/*.py</code>. Built-ins appear too (the connector
+tool loader is one). A plugin that fails to load is logged and skipped -
+never blocking the dashboard. Read-only: this page only reports what
+loaded.</p>
+<table>
+<tr><th>Plugin</th><th>Version</th><th>Description</th><th>Provides</th>
+<th>Status</th></tr>
+{rows}
+</table>""",
+        active="plugins", mode=mode,
+    )
 
 
 def schedules_page(schedules: list[dict], sessions: list[dict],
