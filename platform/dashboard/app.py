@@ -799,6 +799,7 @@ def flow_node_save(node_id: str,
     if node is None:
         return HTMLResponse(html.node_edit_panel(cfg, node_id),
                             status_code=404)
+    old_config = json.loads(json.dumps(node))  # pre-change snapshot (Phase 5)
     kind = node.get("type")
     if kind == "agent":
         node["system_prompt"] = system_prompt
@@ -821,8 +822,77 @@ def flow_node_save(node_id: str,
         return HTMLResponse(html.node_edit_panel(cfg, node_id,
                                                  error=errors[0]),
                             status_code=400)
+    if kind == "agent":
+        # Phase 5: every panel save records the configuration it replaced.
+        # Only successful saves create versions - a rejected edit changed
+        # nothing, so there is no history entry to keep.
+        db.add_version(node_id, old_config)
     response = HTMLResponse(html.node_edit_panel(cfg, node_id,
                                                  message="Saved."))
+    response.headers["HX-Trigger"] = "refresh-diagram"
+    return response
+
+
+@app.get("/flow/nodes/{node_id}/versions", response_class=HTMLResponse,
+         include_in_schema=False)
+def flow_node_versions(node_id: str) -> Response:
+    cfg = flowcfg.load_cfg()
+    found = any(str(n.get("node_id")) == node_id for n in cfg.get("nodes", []))
+    if not found:
+        return HTMLResponse(html.node_edit_panel(cfg, node_id),
+                            status_code=404)
+    return HTMLResponse(html.node_versions_panel(node_id,
+                                                 db.list_versions(node_id)))
+
+
+@app.get("/flow/nodes/{node_id}/versions/{version}",
+         response_class=HTMLResponse, include_in_schema=False)
+def flow_node_version_view(node_id: str, version: int) -> Response:
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if str(n.get("node_id")) == node_id), None)
+    if node is None:
+        return HTMLResponse(html.node_edit_panel(cfg, node_id),
+                            status_code=404)
+    snapshot = db.get_version(node_id, version)
+    if snapshot is None:
+        return HTMLResponse(
+            html.node_versions_panel(node_id, db.list_versions(node_id),
+                                     error=f"No version v{version}."),
+            status_code=404)
+    return HTMLResponse(html.node_version_compare(node_id, node, snapshot))
+
+
+@app.post("/flow/nodes/{node_id}/versions/{version}/restore",
+          response_class=HTMLResponse, include_in_schema=False)
+def flow_node_version_restore(node_id: str, version: int) -> Response:
+    cfg = flowcfg.load_cfg()
+    node = next((n for n in cfg.get("nodes", [])
+                 if str(n.get("node_id")) == node_id), None)
+    if node is None:
+        return HTMLResponse(html.node_edit_panel(cfg, node_id),
+                            status_code=404)
+    snapshot = db.get_version(node_id, version)
+    if snapshot is None:
+        return HTMLResponse(
+            html.node_versions_panel(node_id, db.list_versions(node_id),
+                                     error=f"No version v{version}."),
+            status_code=404)
+    old_config = json.loads(json.dumps(node))
+    node.clear()
+    node.update(snapshot["config"])
+    errors = flowcfg.save_cfg(cfg)
+    if errors:
+        node.clear()
+        node.update(old_config)  # nothing persisted; restore in-memory copy
+        return HTMLResponse(html.node_edit_panel(cfg, node_id,
+                                                 error=errors[0]),
+                            status_code=400)
+    # The restore itself lands in the history: the configuration it replaced
+    # is snapshotted exactly like a normal save, so no state is ever lost.
+    db.add_version(node_id, old_config, label=f"restore of v{version}")
+    response = HTMLResponse(html.node_edit_panel(
+        cfg, node_id, message=f"Restored v{version}."))
     response.headers["HX-Trigger"] = "refresh-diagram"
     return response
 

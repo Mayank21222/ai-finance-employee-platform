@@ -92,12 +92,32 @@ def start_run(task: str, session_id: int, failures: str = "",
     with _ACTIVE_LOCK:
         _RUNS[run_id] = handle
     db.record_run(run_id, session_id, task)
+    _record_agent_versions(run_id)
     handle.thread = threading.Thread(
         target=_worker, args=(handle, session, failures, fresh, app_url),
         name=f"run-{run_id}", daemon=True,
     )
     handle.thread.start()
     return handle
+
+
+def _record_agent_versions(run_id: str) -> None:
+    """Phase 5: stamp the run with the agent config versions it is using.
+
+    Version history stores the configuration each save REPLACED, so the live
+    configuration of an agent is always the next, not-yet-stored version
+    (recorded versions + 1). Bookkeeping must never block a run.
+    """
+    try:
+        flow = _load_flow()
+        versions = {
+            node.node_id: len(db.list_versions(node.node_id)) + 1
+            for node in flow.nodes
+            if getattr(node, "type", "") == "agent"
+        }
+        db.set_run_versions(run_id, versions)
+    except Exception:
+        pass
 
 
 def answer_run(run_id: str, answer: str) -> None:

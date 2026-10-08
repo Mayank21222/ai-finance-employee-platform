@@ -72,6 +72,14 @@ def init_db() -> None:
                 endpoints TEXT NOT NULL DEFAULT '[]',
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS agent_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                config TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -81,6 +89,17 @@ def init_db() -> None:
                         "NOT NULL DEFAULT 'interrupted'")
         except sqlite3.OperationalError:
             pass
+        # Phase 5: agent version numbers used by each run + run source.
+        for ddl in (
+            "ALTER TABLE runs ADD COLUMN agent_versions_used TEXT",
+            "ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'",
+            "ALTER TABLE runs ADD COLUMN schedule_id INTEGER",
+            "ALTER TABLE runs ADD COLUMN skipped_reason TEXT",
+        ):
+            try:
+                con.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         row = con.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()
         if row["n"] == 0:
             con.execute(
@@ -255,3 +274,65 @@ def delete_endpoint(connector_id: int, endpoint_name: str) -> bool:
         con.execute("UPDATE connectors SET endpoints = ? WHERE id = ?",
                     (json.dumps(endpoints), connector_id))
     return True
+
+
+# --- agent configuration version history (Phase 5) --------------------------
+
+
+def add_version(node_id: str, config: dict[str, Any],
+                label: str = "") -> int:
+    """Append an immutable snapshot; versions are never deleted or edited.
+
+    The caller snapshots the configuration being REPLACED (the old one), so
+    every state the agent has ever held is materialized exactly once in the
+    history. Returns the new version number.
+    """
+    with connect() as con:
+        row = con.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM agent_versions "
+            "WHERE node_id = ?", (node_id,)).fetchone()
+        version = int(row["v"]) + 1
+        con.execute(
+            "INSERT INTO agent_versions (node_id, version, config, label, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (node_id, version, json.dumps(config), label, time.time()),
+        )
+        return version
+
+
+def list_versions(node_id: str) -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT * FROM agent_versions WHERE node_id = ? "
+            "ORDER BY version DESC", (node_id,)).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["config"] = json.loads(item["config"])
+        except ValueError:
+            item["config"] = {}
+        out.append(item)
+    return out
+
+
+def get_version(node_id: str, version: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute(
+            "SELECT * FROM agent_versions WHERE node_id = ? AND version = ?",
+            (node_id, version)).fetchone()
+    if row is None:
+        return None
+    item = dict(row)
+    try:
+        item["config"] = json.loads(item["config"])
+    except ValueError:
+        item["config"] = {}
+    return item
+
+
+def set_run_versions(run_id: str, versions: dict[str, int]) -> None:
+    with connect() as con:
+        con.execute(
+            "UPDATE runs SET agent_versions_used = ? WHERE run_id = ?",
+            (json.dumps(versions), run_id))

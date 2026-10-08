@@ -119,6 +119,14 @@ _CSS = """
   .lbl.l-warn { color:var(--warn); }
   .lbl.l-info { color:var(--acc); }
   .lbl.l-dim { color:var(--dim); }
+  /* Phase 5: agent edit panel tabs + version history. */
+  .tab-row { gap:6px; margin:6px 0 10px; }
+  .tab { border:1px solid var(--line); border-radius:5px; padding:4px 12px;
+         color:var(--dim); text-decoration:none; font-size:13px;
+         cursor:pointer; background:none; }
+  .tab.active { color:var(--acc); border-color:var(--acc); }
+  .ver-diff { color:var(--warn); font-size:12.5px; }
+  .cmp-table td.changed { color:var(--warn); }
 """
 
 
@@ -258,11 +266,12 @@ def history_page(runs: list[dict], mode: str = "use") -> str:
             f'<td>{esc(r["tenant"] or "-")} (#{r["session_id"] or "-"})</td>'
             f'<td class="dim">{esc(started)}</td>'
             f'<td class="dim">{esc(finished)}</td>'
+            f'<td class="dim">{esc(_versions_cell(r))}</td>'
             f'<td><a href="/runs/{esc(r["run_id"])}/trace">trace</a> · '
             f'<a href="/runs/{esc(r["run_id"])}/evidence">evidence</a></td></tr>'
         )
     if not rows:
-        rows = '<tr><td colspan="7" class="dim">No runs yet.</td></tr>'
+        rows = '<tr><td colspan="8" class="dim">No runs yet.</td></tr>'
     return page(
         "History",
         """
@@ -272,10 +281,24 @@ approval, resumable), completed, failed, interrupted (cut short by a restart
 or cancel).</p>
 <table>
 <tr><th>Run</th><th>State</th><th>Task</th><th>Session</th><th>Started</th>
-<th>Finished</th><th>Artifacts</th></tr>
+<th>Finished</th><th>Agent versions</th><th>Artifacts</th></tr>
 """ + rows + "</table>",
         active="history", mode=mode,
     )
+
+
+def _versions_cell(run: dict) -> str:
+    """Phase 5: which agent configuration versions the run used."""
+    raw = run.get("agent_versions_used")
+    if not raw:
+        return "-"
+    try:
+        mapping = json.loads(raw)
+    except ValueError:
+        return "-"
+    if not mapping:
+        return "-"
+    return ", ".join(f"{n} v{v}" for n, v in sorted(mapping.items()))
 
 
 def evidence_index_page(run_id: str, names: list[str], mode: str = "use") -> str:
@@ -844,16 +867,117 @@ def node_edit_panel(cfg: dict, node_id: str, message: str = "",
     else:
         fields = ('<p class="dim">End nodes only finish the run - '
                   "nothing to edit.</p>")
+    tabs = _node_tabs(node_id, "edit") if kind == "agent" else ""
     return f"""
 <div class="panel" id="node-panel">
   <div class="row" style="justify-content:space-between">
     <h2 style="margin:0">{esc(node_id)}</h2>
     <span class="badge">{esc(kind)}</span>
   </div>
+  {tabs}
   {msg}{err}
   {form_open}{fields}
   </form>
   {extra}
+</div>"""
+
+
+def _node_tabs(node_id: str, active: str) -> str:
+    """Edit / Versions tabs; both swap the whole panel via HTMX."""
+    edit_cls = "tab active" if active == "edit" else "tab"
+    ver_cls = "tab active" if active == "versions" else "tab"
+    return (
+        f'<div class="row tab-row">'
+        f'<a class="{edit_cls}" hx-get="/flow/nodes/{esc(node_id)}" '
+        f'hx-target="#node-panel" hx-swap="innerHTML">Edit</a>'
+        f'<a class="{ver_cls}" hx-get="/flow/nodes/{esc(node_id)}/versions" '
+        f'hx-target="#node-panel" hx-swap="innerHTML">Versions</a></div>'
+    )
+
+
+def _version_diff(old: dict, new: dict) -> str:
+    """Which top-level fields differ between two configuration snapshots."""
+    keys = sorted(set(old) | set(new))
+    changed = [k for k in keys if old.get(k) != new.get(k)]
+    return ", ".join(changed) if changed else "(no field changed)"
+
+
+def node_versions_panel(node_id: str, versions: list[dict],
+                        message: str = "", error: str = "") -> str:
+    """Phase 5: the version-history tab of an agent's edit panel."""
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    rows = ""
+    for i, v in enumerate(versions):  # newest first
+        older = versions[i + 1]["config"] if i + 1 < len(versions) else None
+        diff = ("(initial configuration)" if older is None
+                else _version_diff(older, v["config"]))
+        label = f' <span class="badge">{esc(v["label"])}</span>' if v.get("label") else ""
+        rows += (
+            f'<tr><td class="mono">v{v["version"]}</td>'
+            f'<td class="dim">{esc(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v["created_at"])))}</td>'
+            f'<td>{esc(v.get("label") or "-")}{label}</td>'
+            f'<td class="ver-diff">{esc(diff)}</td>'
+            f'<td><a class="tab" hx-get="/flow/nodes/{esc(node_id)}/versions/'
+            f'{v["version"]}" hx-target="#node-panel" '
+            f'hx-swap="innerHTML">Compare</a> '
+            f'<button class="tab" hx-post="/flow/nodes/{esc(node_id)}/versions/'
+            f'{v["version"]}/restore" hx-target="#node-panel" '
+            f'hx-swap="innerHTML" '
+            f'hx-confirm="Restore v{v["version"]}? The current config is kept '
+            f'in history.">Restore</button></td></tr>'
+        )
+    if not rows:
+        rows = ('<tr><td colspan="5" class="dim">No versions yet - every '
+                "save from this panel records the configuration it "
+                "replaced.</td></tr>")
+    current = len(versions) + 1  # the live config is the next version number
+    return f"""
+<div class="panel" id="node-panel">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">{esc(node_id)}</h2>
+    <span class="badge">agent</span>
+  </div>
+  {_node_tabs(node_id, "versions")}
+  {msg}{err}
+  <p class="dim">Version history (newest first). The live configuration is
+  <strong>v{current}</strong>; each row below kept the configuration a save
+  replaced. Restores are recorded as new versions too.</p>
+  <table class="cmp-table"><tr><th>Version</th><th>When</th><th>Label</th>
+  <th>Fields changed</th><th></th></tr>{rows}</table>
+</div>"""
+
+
+def node_version_compare(node_id: str, current: dict, snapshot: dict) -> str:
+    """Side-by-side field comparison: live config vs one version snapshot."""
+    keys = sorted(set(current) | set(snapshot))
+    rows = ""
+    for key in keys:
+        if key in ("type",):
+            continue
+        cur = json.dumps(current.get(key), default=str)
+        old = json.dumps(snapshot.get(key), default=str)
+        cls = ' class="changed"' if cur != old else ""
+        rows += (f"<tr><td class='mono'>{esc(key)}</td>"
+                 f"<td{cls}><pre>{esc(cur[:600])}</pre></td>"
+                 f"<td{cls}><pre>{esc(old[:600])}</pre></td></tr>")
+    return f"""
+<div class="panel" id="node-panel">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">{esc(node_id)}</h2>
+    <span class="badge">v{snapshot["version"]}</span>
+  </div>
+  {_node_tabs(node_id, "versions")}
+  <p class="dim">Comparing the live configuration with v{snapshot["version"]}
+  {esc("(" + snapshot["label"] + ")" if snapshot.get("label") else "")}.
+  Highlighted rows differ.</p>
+  <table class="cmp-table"><tr><th>Field</th><th>Current</th>
+  <th>v{snapshot["version"]}</th></tr>{rows}</table>
+  <p><a class="tab" hx-get="/flow/nodes/{esc(node_id)}/versions"
+     hx-target="#node-panel" hx-swap="innerHTML">Back to versions</a>
+  <button class="tab" hx-post="/flow/nodes/{esc(node_id)}/versions/{snapshot["version"]}/restore"
+   hx-target="#node-panel" hx-swap="innerHTML"
+   hx-confirm="Restore v{snapshot["version"]}?">Restore this version</button></p>
 </div>"""
 
 
