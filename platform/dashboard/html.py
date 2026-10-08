@@ -14,6 +14,7 @@ NAV = [
     ("models", "/models", "Data models", "edit"),
     ("connectors", "/connectors", "Connectors", "edit"),
     ("schedules", "/schedules", "Schedules", "edit"),
+    ("triggers", "/triggers", "Triggers", "edit"),
     ("skills", "/skills", "Skills", "edit"),
     ("roles", "/roles", "Roles", "edit"),
     ("apikeys", "/apikeys", "API keys", "edit"),
@@ -1688,6 +1689,91 @@ a skipped run and retried at the next check.</p>
     )
 
 
+def triggers_page(triggers: list[dict], sessions: list[dict],
+                  error: str = "", message: str = "",
+                  mode: str = "use") -> str:
+    """Phase 6 section 5: event triggers (inbox folder + webhook)."""
+    by_id = {s["id"]: s for s in sessions}
+    rows = ""
+    for t in triggers:
+        sess = by_id.get(t["session_id"])
+        sess_txt = (f'#{t["session_id"]} {esc(sess["tenant"])}'
+                    if sess else f'#{t["session_id"]}')
+        enabled = bool(t.get("enabled"))
+        cfg = t.get("config") or {}
+        detail = (esc(cfg.get("path") or "company_data/<tenant>/inbox")
+                  if t["type"] == "inbox_folder" else
+                  "header X-Trigger-Secret: " +
+                  esc((str(t.get("secret") or ""))[:4] + "…"
+                      if t.get("secret") else "(none)"))
+        last = (time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(t["last_fired_at"]))
+                if t.get("last_fired_at") else "-")
+        run_link = (f'<a class="mono" href="/runs/{esc(t["last_run_id"])}">'
+                    f'{esc(str(t["last_run_id"])[:24])}</a>'
+                    if t.get("last_run_id") else "-")
+        rows += (
+            f'<tr><td class="mono">{t["id"]}</td>'
+            f'<td><span class="badge">{esc(t["type"])}</span></td>'
+            f'<td>{sess_txt}</td>'
+            f'<td class="mono">{detail}</td>'
+            f'<td class="mono" title="{esc(t.get("task_template") or "")}">'
+            f'{esc((t.get("task_template") or "")[:60])}</td>'
+            f'<td><span class="badge '
+            f'{"completed" if enabled else "interrupted"}">'
+            f'{"enabled" if enabled else "disabled"}</span></td>'
+            f'<td class="dim">{esc(last)}</td><td>{run_link}</td>'
+            f'<td class="row">'
+            f'<form method="post" action="/triggers/{t["id"]}/toggle">'
+            f'<button>{"Disable" if enabled else "Enable"}</button></form>'
+            f'<form method="post" action="/triggers/{t["id"]}/delete" '
+            f'onsubmit="return confirm(\'Delete trigger {t["id"]}?\')">'
+            f'<button>Delete</button></form></td></tr>')
+    if not rows:
+        rows = ('<tr><td colspan="9" class="dim">No triggers yet.</td></tr>')
+    session_opts = "".join(
+        f'<option value="{s["id"]}">#{s["id"]} {esc(s["tenant"])}'
+        f'</option>' for s in sessions)
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Triggers",
+        f"""
+<h1>Event triggers</h1>
+{msg}{err}
+<p class="dim">A trigger starts a run through the same path as the console
+(one run at a time; skips are recorded with a reason). <strong>inbox_folder</strong>:
+the scheduler polls the folder every 60s, runs <code>{{{{file.name}}}}</code>
+templates and moves files to <code>processed/</code> (or <code>failed/</code>
+when the run fails). <strong>webhook</strong>: POST
+<code>/api/v1/triggers/&lt;id&gt;/fire</code> with the secret in the
+<code>X-Trigger-Secret</code> header; the JSON body fills template values.</p>
+<table>
+<tr><th>ID</th><th>Type</th><th>Session</th><th>Path / secret</th>
+<th>Task template</th><th>Status</th><th>Last fired</th><th>Last run</th>
+<th></th></tr>
+{rows}
+</table>
+<h2>New trigger</h2>
+<form method="post" action="/triggers" class="row">
+  <select name="type">
+    <option value="inbox_folder">inbox_folder</option>
+    <option value="webhook">webhook</option>
+  </select>
+  <select name="session_id">{session_opts}</select>
+  <input name="path" placeholder="inbox folder path (inbox triggers)"
+         style="flex:2">
+  <input name="task_template" required
+         placeholder="task: process {{{{file.name}}}} or ping {{{{note}}}}"
+         style="flex:3">
+  <input name="secret" placeholder="webhook secret (blank = generate)"
+         style="flex:2">
+  <button class="primary">Add trigger</button>
+</form>""",
+        active="triggers", mode=mode,
+    )
+
+
 def skills_page(skills: list[dict], users: dict[str, list[str]],
                 error: str = "", message: str = "", mode: str = "use") -> str:
     """Phase 5: reusable skills and which agents currently attach each one."""
@@ -1895,6 +1981,10 @@ access, or leave it read-only by assignment.</p>""",
 _AUDIT_LABELS = {
     "api_key_created": "l-write",
     "api_key_revoked": "l-err",
+    "trigger_created": "l-write",
+    "trigger_deleted": "l-write",
+    "channel_created": "l-write",
+    "channel_deleted": "l-write",
     "variable_written": "l-write",
     "permission_denied": "l-err",
     "permission_denied_role": "l-err",

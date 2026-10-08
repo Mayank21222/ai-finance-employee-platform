@@ -162,6 +162,19 @@ def init_db() -> None:
                 created_at REAL NOT NULL,
                 revoked INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS triggers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                config TEXT NOT NULL DEFAULT '{}',
+                task_template TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_fired_at REAL,
+                last_run_id TEXT,
+                last_file_path TEXT,
+                secret TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -705,3 +718,67 @@ def api_key_role(plain: str) -> str | None:
     if row is None or row["revoked"]:
         return None
     return str(row["role_name"])
+
+
+# --- Phase 6 section 5: event triggers --------------------------------------
+
+def _trigger_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["config"] = json.loads(data.get("config") or "{}")
+    except ValueError:
+        data["config"] = {}
+    return data
+
+
+def list_triggers() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM triggers ORDER BY id").fetchall()
+    return [_trigger_row(r) for r in rows]
+
+
+def get_trigger(trigger_id: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM triggers WHERE id = ?",
+                          (int(trigger_id),)).fetchone()
+    return _trigger_row(row) if row else None
+
+
+def add_trigger(session_id: int, type: str, config: dict[str, Any],
+                 task_template: str, secret: str = "",
+                 enabled: bool = True) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO triggers (session_id, type, config, task_template, "
+            "enabled, secret, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (int(session_id), type, json.dumps(config), task_template,
+             int(bool(enabled)), secret, time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def set_trigger_enabled(trigger_id: int, enabled: bool) -> None:
+    with connect() as con:
+        con.execute("UPDATE triggers SET enabled = ? WHERE id = ?",
+                    (int(bool(enabled)), int(trigger_id)))
+
+
+def delete_trigger(trigger_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM triggers WHERE id = ?", (int(trigger_id),))
+
+
+def mark_trigger_fired(trigger_id: int, run_id: str,
+                       file_path: str | None = None) -> None:
+    with connect() as con:
+        con.execute(
+            "UPDATE triggers SET last_fired_at = ?, last_run_id = ?, "
+            "last_file_path = COALESCE(?, last_file_path) WHERE id = ?",
+            (time.time(), run_id, file_path, int(trigger_id)))
+
+
+def clear_trigger_file(trigger_id: int) -> None:
+    """The last fired file has been settled (processed/ or failed/)."""
+    with connect() as con:
+        con.execute("UPDATE triggers SET last_file_path = NULL WHERE id = ?",
+                    (int(trigger_id),))

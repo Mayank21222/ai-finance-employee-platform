@@ -123,6 +123,15 @@ def _loop() -> None:
             check_due()
         except Exception as exc:  # noqa: BLE001
             print(f"[scheduler] check failed: {exc!r}")
+        # Phase 6 section 5: event triggers use the same 60-second cadence.
+        try:
+            from platform.dashboard import triggers
+
+            started = triggers.poll_inbox()
+            if started:
+                print(f"[scheduler] inbox trigger runs: {', '.join(started)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[scheduler] trigger check failed: {exc!r}")
 
 
 def start() -> None:

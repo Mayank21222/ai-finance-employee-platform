@@ -416,6 +416,73 @@ def schedules_delete(schedule_id: int):
     return RedirectResponse("/schedules", status_code=303)
 
 
+# --- triggers (Phase 6 section 5) -------------------------------------------
+
+@app.get("/triggers", response_class=HTMLResponse, include_in_schema=False)
+def triggers_page(request: Request, message: str = "", error: str = "") -> str:
+    return html.triggers_page(db.list_triggers(), db.list_sessions(),
+                              message=message, error=error,
+                              mode=_mode(request))
+
+
+@app.post("/triggers", include_in_schema=False)
+def triggers_add(session_id: int = Form(...), type: str = Form(...),
+                  path: str = Form(""), task_template: str = Form(...),
+                  secret: str = Form("")):
+    if type not in ("inbox_folder", "webhook"):
+        return HTMLResponse(html.triggers_page(
+            db.list_triggers(), db.list_sessions(),
+            error="Type must be inbox_folder or webhook."), status_code=400)
+    if db.get_session(session_id) is None:
+        return HTMLResponse(html.triggers_page(
+            db.list_triggers(), db.list_sessions(),
+            error="Unknown session."), status_code=400)
+    if not task_template.strip():
+        return HTMLResponse(html.triggers_page(
+            db.list_triggers(), db.list_sessions(),
+            error="A task template is required."), status_code=400)
+    if type == "webhook" and not secret.strip():
+        import secrets as _secrets
+
+        secret = _secrets.token_urlsafe(16)  # shown once on the page
+    db.add_trigger(session_id, type, {"path": path.strip()},
+                   task_template.strip(), secret=secret.strip())
+    _audit_event("trigger_created", type=type)
+    message = "Trigger added."
+    if type == "webhook" and secret.strip():
+        message = ("Trigger added. Webhook secret - shown only now; send "
+                   "it as the X-Trigger-Secret header: " + secret.strip())
+    return HTMLResponse(html.triggers_page(
+        db.list_triggers(), db.list_sessions(), message=message))
+
+
+@app.post("/triggers/{trigger_id}/toggle", include_in_schema=False)
+def triggers_toggle(trigger_id: int):
+    row = db.get_trigger(trigger_id)
+    if row is not None:
+        db.set_trigger_enabled(trigger_id, not bool(row["enabled"]))
+    return RedirectResponse("/triggers", status_code=303)
+
+
+@app.post("/triggers/{trigger_id}/delete", include_in_schema=False)
+def triggers_delete(trigger_id: int):
+    db.delete_trigger(trigger_id)
+    _audit_event("trigger_deleted", trigger_id=trigger_id)
+    return RedirectResponse("/triggers", status_code=303)
+
+
+@app.post("/api/v1/triggers/{trigger_id}/fire", include_in_schema=False)
+def api_fire_trigger(trigger_id: int, request: Request,
+                      payload: dict = Body(default={})):
+    """Webhook entry point: authenticated by the trigger's own secret."""
+    from platform.dashboard import triggers
+
+    status, body = triggers.fire_webhook(
+        trigger_id, payload or {},
+        str(request.headers.get("x-trigger-secret") or ""))
+    return JSONResponse(body, status_code=status)
+
+
 # --- skills (Phase 5) -------------------------------------------------------
 
 
