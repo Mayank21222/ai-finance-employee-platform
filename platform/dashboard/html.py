@@ -903,3 +903,104 @@ def _registry_names() -> list[str]:
     from ai_operator.tools import registry
 
     return registry.names()
+
+
+def models_page(models: list, audit: dict[str, list[dict]] | None = None,
+                error: str = "", message: str = "",
+                mode: str = "use") -> str:
+    """Phase 4: the data models page (configure mode).
+
+    Models are the separately-configurable extraction contract: field names,
+    types, required flags, descriptions and per-field write/read agent lists.
+    The audit section shows the field-level write trail from the runs' traces.
+    """
+    audit = audit or {}
+    cards = []
+    for model in models:
+        fields = model.get("fields") or []
+        rows = []
+        for f in fields:
+            rows.append(
+                f"<tr><td class=\"mono\"><strong>{esc(f['name'])}</strong></td>"
+                f"<td>{esc(f['type'])}</td>"
+                f"<td>{'required' if f.get('required') else 'optional'}</td>"
+                f"<td>{esc(f.get('description') or '')}</td>"
+                f"<td class=\"mono\">{esc(', '.join(f.get('write_agents') or []) or '—')}</td>"
+                f"<td class=\"mono\">{esc(', '.join(f.get('read_agents') or []) or '—')}</td>"
+                f'<td><form method="post" '
+                f'action="/models/{esc(model["name"])}/fields/{esc(f["name"])}/'
+                f'delete"><button>×</button></form></td></tr>'
+            )
+        fields_html = "".join(rows) or (
+            '<tr><td colspan="7" class="dim">No fields yet.</td></tr>')
+        writes = audit.get(model["name"]) or []
+        audit_rows = "".join(
+            f"<tr><td class=\"mono\">{esc(w['run_id'])}</td>"
+            f"<td>{esc(w.get('node') or '?')}</td>"
+            f"<td class=\"mono\">{esc(w.get('name') or '')}</td>"
+            f"<td class=\"mono\">{esc(w.get('old'))}</td>"
+            f"<td class=\"mono\">{esc(w.get('new'))}</td>"
+            f"<td class=\"dim\">{esc(w.get('time') or '')}</td></tr>"
+            for w in writes[:20]
+        ) or '<tr><td colspan="6" class="dim">No traced field writes yet.</td></tr>'
+        cards.append(f"""
+<div class="panel" id="model-{esc(model['name'])}">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">{esc(model['name'])}</h2>
+    <div class="row">
+      <span class="dim">{esc(model.get('description') or '')}</span>
+      <form method="post" action="/models/{esc(model['name'])}/delete"
+            class="row" style="display:inline"
+            onsubmit="return confirm('Delete model {esc(model['name'])}?')">
+        <button>Delete model</button></form>
+    </div>
+  </div>
+  <table>
+  <tr><th>Field</th><th>Type</th><th>Required</th><th>Description
+  </th><th>Can write</th><th>Can read</th><th></th></tr>
+  {fields_html}
+  </table>
+  <form method="post" action="/models/{esc(model['name'])}/fields"
+        class="row">
+    <input name="field_name" placeholder="field name" required
+           pattern="[A-Za-z0-9_]+">
+    <select name="field_type">
+      <option value="text">text</option><option value="number">number</option>
+      <option value="date">date</option><option value="boolean">boolean</option>
+    </select>
+    <label class="dim"><input type="checkbox" name="required" value="1">
+      required</label>
+    <input name="description" placeholder="what to extract" style="flex:2">
+    <input name="write_agents" placeholder="write agents, comma separated"
+           value="ap_agent">
+    <input name="read_agents" placeholder="read agents, comma separated">
+    <button class="primary">Add field</button>
+  </form>
+  <h3 class="dim" style="margin-top:18px">Field write audit</h3>
+  <table>
+  <tr><th>Run</th><th>Agent</th><th>Field</th><th>Old</th><th>New</th>
+  <th>Time</th></tr>
+  {audit_rows}
+  </table>
+</div>""")
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Data models",
+        f"""
+<h1>Data models</h1>
+{msg}{err}
+<p class="dim">A data model is the extraction contract an agent follows: field
+names become session variable names, and the compiler appends this field list
+to the agent's context. Field write/read permissions are enforced in code on
+the variable write path.</p>
+{"".join(cards) or '<p class="dim">No data models yet.</p>'}
+<h2>New data model</h2>
+<form method="post" action="/models" class="row">
+  <input name="name" placeholder="model name (e.g. Vendor)" required
+         pattern="[A-Za-z0-9_]+">
+  <input name="description" placeholder="description" style="flex:2">
+  <button class="primary">Create model</button>
+</form>""",
+        active="models", mode=mode,
+    )

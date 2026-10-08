@@ -426,6 +426,135 @@ def sessions_delete(session_id: int) -> Response:
     return RedirectResponse("/sessions", status_code=303)
 
 
+# --- data models (Phase 4) -------------------------------------------------
+
+
+def _field_audit() -> dict[str, list[dict]]:
+    """Recent field-level writes per model, from the runs' trace files."""
+    from ai_operator import datamodel
+
+    by_model: dict[str, list[dict]] = {}
+    field_of_model = {
+        f.name: m.name for m in datamodel.load_models() for f in m.fields
+    }
+    if not field_of_model:
+        return by_model
+    latest_first = []
+    for run_dir in sorted(RUNS_ROOT.glob("*/trace.jsonl"),
+                          key=lambda p: p.stat().st_mtime, reverse=True):
+        path = run_dir.parent / "trace.jsonl"
+        try:
+            for line in path.read_text(errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                ev = json.loads(line)
+                if ev.get("event") not in ("variable_written",
+                                           "permission_denied"):
+                    continue
+                name = str(ev.get("name") or "")
+                if name in field_of_model:
+                    latest_first.append({
+                        "model": field_of_model[name],
+                        "run_id": ev.get("run_id", run_dir.parent.name),
+                        "node": ev.get("node"), "name": name,
+                        "old": ev.get("old"), "new": ev.get("new"),
+                        "time": ev.get("time", ""), "denied": ev.get("event")
+                        == "permission_denied",
+                    })
+        except (OSError, ValueError):
+            continue
+    for ev in latest_first:
+        by_model.setdefault(ev["model"], []).append(ev)
+    return by_model
+
+
+@app.get("/models", response_class=HTMLResponse, include_in_schema=False)
+def models_page(request: Request):
+    from ai_operator import datamodel
+
+    models = [m.model_dump() for m in datamodel.load_models()]
+    return html.models_page(models, audit=_field_audit(),
+                            mode=_mode(request))
+
+
+@app.post("/models", include_in_schema=False)
+def models_create(request: Request, name: str = Form(...),
+                  description: str = Form("")):
+    from ai_operator import datamodel
+
+    name = name.strip()
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        return HTMLResponse(html.models_page(
+            [m.model_dump() for m in datamodel.load_models()],
+            error="Model name must be letters, digits, underscores.",
+            mode=_mode(request)), status_code=400)
+    if datamodel.get_model(name) is not None:
+        return HTMLResponse(html.models_page(
+            [m.model_dump() for m in datamodel.load_models()],
+            error=f"Model '{name}' already exists.",
+            mode=_mode(request)), status_code=400)
+    models = datamodel.load_models()
+    models.append(datamodel.DataModel(name=name, description=description.strip()))
+    datamodel.save_models(models)
+    return RedirectResponse("/models", status_code=303)
+
+
+@app.post("/models/{name}/delete", include_in_schema=False)
+def models_delete(request: Request, name: str):
+    from ai_operator import datamodel
+
+    models = [m for m in datamodel.load_models() if m.name != name]
+    datamodel.save_models(models, seed_if_empty=False)
+    return RedirectResponse("/models", status_code=303)
+
+
+@app.post("/models/{name}/fields", include_in_schema=False)
+def models_add_field(request: Request, name: str,
+                     field_name: str = Form(...), field_type: str = Form(...),
+                     required: str = Form(""),
+                     description: str = Form(""),
+                     write_agents: str = Form(""),
+                     read_agents: str = Form("")):
+    from ai_operator import datamodel
+
+    models = datamodel.load_models()
+    model = next((m for m in models if m.name == name), None)
+    if model is None:
+        return Response(status_code=404)
+    field_name = field_name.strip()
+    try:
+        field = datamodel.FieldSpec(
+            name=field_name, type=field_type,
+            required=bool(required),
+            description=description.strip(),
+            write_agents=[a.strip() for a in write_agents.split(",")
+                          if a.strip()],
+            read_agents=[a.strip() for a in read_agents.split(",")
+                         if a.strip()],
+        )
+        model.fields.append(field)
+        datamodel.DataModel.model_validate(model.model_dump())  # uniqueness
+        datamodel.save_models(models)
+    except Exception as exc:
+        return HTMLResponse(html.models_page(
+            [m.model_dump() for m in models],
+            error=str(exc), mode=_mode(request)), status_code=400)
+    return RedirectResponse("/models", status_code=303)
+
+
+@app.post("/models/{name}/fields/{field}/delete", include_in_schema=False)
+def models_delete_field(request: Request, name: str, field: str):
+    from ai_operator import datamodel
+
+    models = datamodel.load_models()
+    model = next((m for m in models if m.name == name), None)
+    if model is None:
+        return Response(status_code=404)
+    model.fields = [f for f in model.fields if f.name != field]
+    datamodel.save_models(models)
+    return RedirectResponse("/models", status_code=303)
+
+
 # --- flow editor -----------------------------------------------------------
 
 

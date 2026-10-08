@@ -63,7 +63,8 @@
       ],
       "next_node_ids": ["check_invoice"],
       "fallback_next": "report",
-      "save_as": "ap_answer"
+      "save_as": "ap_answer",
+      "data_model": "Invoice"
     },
     {
       "type": "agent",

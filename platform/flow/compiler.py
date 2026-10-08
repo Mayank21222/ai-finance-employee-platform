@@ -16,6 +16,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from ai_operator import datamodel
 from ai_operator.nodes import ask, decide, execute, finish, understand, verify_node
 from ai_operator.state import AgentState
 from ai_operator.tools import browser as browser_tools
@@ -117,6 +118,13 @@ def _add_agent(
     documents = _load_documents(node.documents)
     allowed_tools = tuple(node.tools_enabled)
     instructions = node.instructions or None
+    # Phase 4: the attached data model's field list becomes part of the
+    # agent's context so field names and types never have to be hardcoded
+    # in a prompt again.
+    if node.data_model:
+        block = datamodel.prompt_block(node.data_model)
+        if block:
+            persona = f"{persona or ''}\n{block}".strip()
 
     def entry(state: AgentState) -> dict:
         trace_event(state["run_id"], "node_entered", node=nid, node_type="agent")
@@ -137,7 +145,8 @@ def _add_agent(
             decision = updates.get("last_decision") or {}
             if decision.get("action_type") in ("verify", "finish"):
                 answer = decision.get("expected_outcome") or decision.get("thought") or ""
-                updates.update(write_variable(state, nid, node.save_as, answer))
+                updates.update(write_variable(state, nid, node.save_as, answer,
+                                              model=node.data_model))
         return updates
 
     def execute_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -290,10 +299,24 @@ def _add_message(
 def _add_verify(
     graph: StateGraph, node: VerifyNode, first_end: str, flow: Flow
 ) -> None:
+    # Phase 4: the verifier learns the expected field names and types from the
+    # data model attached to the (single) extraction agent instead of
+    # hardcoding them.
+    model_fields: list | None = None
+    model_name: str | None = None
+    for candidate in flow.nodes:
+        if isinstance(candidate, AgentNode) and candidate.data_model:
+            model = datamodel.get_model(candidate.data_model)
+            if model is not None:
+                model_fields = model.fields
+                model_name = model.name
+            break
+
     def run(state: AgentState) -> dict:
         trace_event(state["run_id"], "node_entered", node=node.node_id,
                     node_type="verify")
-        updates = verify_node.run_verify(state)
+        updates = verify_node.run_verify(state, model_fields=model_fields,
+                                         model_name=model_name)
         trace_event(state["run_id"], "node_exited", node=node.node_id)
         return updates
 

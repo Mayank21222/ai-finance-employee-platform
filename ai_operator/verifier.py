@@ -33,6 +33,87 @@ class VerificationResult(BaseModel):
     found: dict[str, Any] | list[Any]
     matched: bool
     details: str
+    model_check: dict[str, Any] | None = None
+    """Phase 4: data-model field type/format checks over written variables."""
+
+
+def check_model_fields(
+    variables: dict[str, Any],
+    fields: list[Any],
+    model_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Type/format-check the data model fields the run actually wrote.
+
+    Returns None when no model field was written (nothing to check). Each
+    written field is validated against its declared type: number fields must
+    parse as numbers, date fields as ISO dates, boolean fields as booleans,
+    text fields as non-empty scalars. The verifier owns these checks - they
+    never live in the agent prompt.
+    """
+    present = {f.name: variables.get(f.name) for f in fields
+               if f.name in variables and variables.get(f.name) is not None}
+    if not present:
+        return None
+    per: dict[str, dict[str, Any]] = {}
+    matched = True
+    for field in fields:
+        if field.name not in present:
+            continue
+        ok, note = _check_one(field, present[field.name])
+        per[field.name] = {"value": present[field.name], "type": field.type,
+                           "required": field.required, "ok": ok, "note": note}
+        matched = matched and ok
+    return {
+        "model": model_name or "",
+        "matched": matched,
+        "fields": per,
+        "details": (
+            "all written data-model fields passed type checks"
+            if matched else
+            "data-model field type checks failed: "
+            + "; ".join(f"{k}: {v['note']}" for k, v in per.items()
+                        if not v["ok"])
+        ),
+    }
+
+
+def _check_one(field: Any, value: Any) -> tuple[bool, str]:
+    name = field.name
+    if isinstance(value, bool):
+        scalar = value
+    elif value is None or value == "":
+        return (False, "empty value") if field.required else (True, "optional field empty")
+    else:
+        scalar = value
+    if field.type in ("text",):
+        return (True, "text field readable")
+    if field.type == "number":
+        if isinstance(scalar, bool):
+            return (False, "expected a number, got a boolean")
+        try:
+            cleaned = str(scalar).replace(",", "").replace("₹", "").strip()
+            float(cleaned)
+            return (True, "parses as a number")
+        except (TypeError, ValueError):
+            return (False, f"expected a number, got {scalar!r}")
+    if field.type == "date":
+        import datetime as _dt
+
+        if hasattr(scalar, "isoformat"):
+            scalar = scalar.isoformat()
+        try:
+            _dt.date.fromisoformat(str(scalar).strip())
+            return (True, "valid ISO date")
+        except (TypeError, ValueError):
+            return (False, f"expected an ISO date (YYYY-MM-DD), got {scalar!r}")
+    if field.type == "boolean":
+        if isinstance(scalar, bool):
+            return (True, "boolean field")
+        if str(scalar).strip().lower() in ("true", "yes", "1", "on", "false",
+                                           "no", "0", "off"):
+            return (True, "boolean-like value")
+        return (False, f"expected a boolean, got {scalar!r}")
+    return (True, f"{field.type} not type-checked")
 
 
 def vendor_from_task(task: str) -> str | None:

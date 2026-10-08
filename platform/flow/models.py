@@ -43,6 +43,13 @@ class AgentNode(BaseModel):
     leaves through next_node_ids/fallback_next as before. This is how the
     Classifier picks a specialist without any code change.
     """
+    data_model: str | None = None
+    """Phase 4: name of the config-defined data model this agent extracts.
+
+    The compiler appends the model's structured field list below this agent's
+    instructions and registers field-level write/read permissions for the
+    variable write path.
+    """
 
 
 class MessageNode(BaseModel):

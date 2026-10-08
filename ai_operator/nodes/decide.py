@@ -140,9 +140,10 @@ def _validate(raw: str, client: ModelClient, system: str, user: str) -> tuple[De
         return Decision.model_validate(extract_json(raw)), failures
     except (ValidationError, ValueError) as exc:
         failures = 1
+        reason = str(exc)
     raw = client.complete(
         system,
-        f"{user}\n\n[SCHEMA ERROR]\nYour previous output was rejected: {exc}\n"
+        f"{user}\n\n[SCHEMA ERROR]\nYour previous output was rejected: {reason}\n"
         "Return the corrected JSON object only.",
     )
     try:

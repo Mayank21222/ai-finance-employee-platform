@@ -75,6 +75,14 @@ def validate(flow: Flow) -> list[str]:
                         f"Agent node '{node.node_id}' enables tool '{tool_name}', "
                         "which does not exist in the tool registry."
                     )
+            if node.data_model:
+                from ai_operator.datamodel import get_model
+
+                if get_model(node.data_model) is None:
+                    errors.append(
+                        f"Agent node '{node.node_id}' references an unknown "
+                        f"data model '{node.data_model}'."
+                    )
         elif isinstance(node, MessageNode):
             if not node.next_node_ids and not node.fallback_next:
                 errors.append(
