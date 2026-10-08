@@ -41,7 +41,8 @@
         "payment_reminder": "reminder_agent",
         "expense_review": "ap_agent",
         "unknown": "ap_agent"
-      }
+      },
+      "role": "auditor"
     },
     {
       "type": "agent",
@@ -70,7 +71,8 @@
       ],
       "fallback_next": "report",
       "save_as": "ap_answer",
-      "data_model": "Invoice"
+      "data_model": "Invoice",
+      "role": "ap_clerk"
     },
     {
       "type": "agent",

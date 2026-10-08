@@ -15,6 +15,7 @@ NAV = [
     ("connectors", "/connectors", "Connectors", "edit"),
     ("schedules", "/schedules", "Schedules", "edit"),
     ("skills", "/skills", "Skills", "edit"),
+    ("roles", "/roles", "Roles", "edit"),
     ("sessions", "/sessions", "Sessions", "edit"),
     ("agents", "/agents", "Agents", "edit"),
     ("flow", "/flow", "Flow editor", "edit"),
@@ -57,6 +58,10 @@ _CSS = """
   button.primary { background:var(--acc); color:#06121f; border-color:var(--acc);
                    font-weight:600; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  table.matrix td button { font-size:11px; padding:3px 8px; }
+  table.matrix button.btn-write { color:var(--ok); border-color:var(--ok); }
+  table.matrix button.btn-approve { color:var(--warn); border-color:var(--warn); }
+  table.matrix th { position:sticky; top:0; background:var(--panel); }
   .dim { color:var(--dim); }
   .err { color:var(--err); }
   .ok { color:var(--ok); }
@@ -167,6 +172,10 @@ def page(title: str, body: str, active: str = "", mode: str = "use") -> str:
 
 def sessions_page(sessions: list[dict], error: str = "",
                   mode: str = "use") -> str:
+    role_options = "".join(
+        f'<option value="{esc(r)}"> {esc(r)}</option>'
+        for r in _role_names()
+    )
     rows = "".join(
         f"<tr><td>{s['id']}</td><td>{esc(s['tenant'])}</td>"
         f"<td>{esc(s['currency'])}</td><td>{s['approval_threshold']}</td>"
@@ -194,12 +203,12 @@ def sessions_page(sessions: list[dict], error: str = "",
   <input name="currency" placeholder="currency" value="INR" required>
   <input name="approval_threshold" type="number" step="any" min="0"
          placeholder="threshold" value="50000" required>
-  <input name="user_role" placeholder="user role" value="finance_operator"
-         required>
+  <select name="user_role">{role_options}</select>
   <button class="primary">Add session</button>
 </form>
 <p class="dim">Runs are linked to a session by ID; the session supplies
-tenant, currency, approval threshold and user role at start.</p>""",
+tenant, currency, approval threshold and user role (a real role from the
+Roles page) at start.</p>""",
         active="sessions", mode=mode,
     )
 
@@ -467,19 +476,37 @@ def approval_card(run_id: str, session: dict | None, events: list[dict]) -> str:
                 f'<p class="who {cls}">{verdict.capitalize()} by '
                 f"{esc(who)}<span class='dim'> · {esc(when)}</span></p>"
                 "</div>")
+    # Phase 6: the card checks the approver's role before offering Approve - an
+    # auditor (or an ap_clerk past their limit) sees the reason up front, and
+    # the same check rejects the POST in app.py (approval_denied_role).
+    gate_reason = ""
+    if session and session.get("user_role"):
+        from ai_operator import roles
+        amount = roles.approval_amount(req.get("tool_args"))
+        can, gate_reason = roles.approve_gate(str(session["user_role"]), amount)
+    else:
+        can, gate_reason = True, ""
+    approve_btn = (
+        f'<button class="primary" hx-post="/runs/{esc(run_id)}/answer" '
+        f'hx-vals=\'{{"answer": "approve"}}\' '
+        f'hx-target="#approval-card-body" hx-swap="innerHTML">'
+        f"Approve</button>"
+        if can else
+        f'<span class="badge" style="background:#f44336;color:#fff">'
+        f"{esc(gate_reason)}</span>"
+    )
     return (f'<div class="approval-card pending">'
-            f'<h2 style="margin-top:0">approval requested</h2>'
-            f"{action}{policy}{summary_html}"
-            f'<div class="row" style="margin-top:12px">'
-            f'<button class="primary" hx-post="/runs/{esc(run_id)}/answer" '
-            f'hx-vals=\'{{"answer": "approve"}}\' '
-            f'hx-target="#approval-card-body" hx-swap="innerHTML">'
-            f"Approve</button>"
-            f'<button hx-post="/runs/{esc(run_id)}/answer" '
-            f'hx-vals=\'{{"answer": "reject"}}\' '
-            f'hx-target="#approval-card-body" hx-swap="innerHTML">'
-            f"Reject</button>"
-            f"</div></div>")
+            f'<h2 style="margin-top:0">approval requested'
+            + (" — requires a higher role</h2>" if not can else "</h2>")
+            + f"{action}{policy}{summary_html}"
+            + (f'<p class="err">{esc(gate_reason or "requires a higher role")}</p>'
+               if not can else "")
+            + f'<div class="row" style="margin-top:12px">'
+            + approve_btn
+            + f'<button hx-post="/runs/{esc(run_id)}/answer" '
+            + f'hx-vals=\'{{"answer": "reject"}}\' '
+            + f'hx-target="#approval-card-body" hx-swap="innerHTML">'
+            + f"Reject</button></div></div>")
 
 
 def approval_panel_html(run_id: str, session: dict | None,
@@ -710,17 +737,39 @@ def mermaid_diagram(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-def validation_panel(errors: list[str] | None = None) -> str:
+def validation_panel(errors=None) -> str:
+    """Blocking errors and guardrail warnings, rendered separately.
+
+    Accepts a ValidationResult (Phase 6 lint), a plain error list (legacy
+    callers), or None for the idle hint. Warnings are never blocking.
+    """
     if errors is None:
         return ('<div class="panel" id="validation"><span class="dim">'
                 "Click ‘Validate flow’ to check the config.</span></div>")
-    if not errors:
+    warning_list: list[str] = []
+    if hasattr(errors, "errors"):  # ValidationResult
+        warning_list = list(getattr(errors, "warnings", []) or [])
+        errors = list(errors.errors)
+    else:
+        errors = list(errors or [])
+    if not errors and not warning_list:
         return ('<div class="panel" id="validation">'
                 '<span class="ok">Flow is valid.</span></div>')
-    lis = "".join(f"<li>{esc(e)}</li>" for e in errors)
-    return ('<div class="panel" id="validation">'
-            f'<span class="err">Flow has {len(errors)} problem(s):</span>'
-            f"<ul>{lis}</ul></div>")
+    parts = []
+    if errors:
+        lis = "".join(f"<li>{esc(e)}</li>" for e in errors)
+        parts.append(
+            f'<span class="err">Flow has {len(errors)} blocking problem(s):</span>'
+            f"<ul>{lis}</ul>")
+    else:
+        parts.append('<span class="ok">Flow is valid.</span>')
+    if warning_list:
+        lis = "".join(f"<li>{esc(w)}</li>" for w in warning_list)
+        parts.append(
+            f'<span style="color:var(--warn)">Guardrail score: '
+            f'{len(warning_list)} warning(s) (non-blocking):</span>'
+            f"<ul>{lis}</ul>")
+    return ('<div class="panel" id="validation">' + "".join(parts) + "</div>")
 
 
 NODE_STROKE = {"agent": "#4da3ff", "message": "#3ecf8e",
@@ -841,6 +890,16 @@ def _skill_names() -> list[str]:
         from platform.dashboard import db
 
         return [s["name"] for s in db.list_skills()]
+    except Exception:
+        return []
+
+
+def _role_names() -> list[str]:
+    """Role names for selects and the matrix (lazy DB read; [] on error)."""
+    try:
+        from platform.dashboard import db
+
+        return [r["name"] for r in db.list_roles()]
     except Exception:
         return []
 
@@ -1093,6 +1152,17 @@ def flow_page(cfg: dict, errors: list[str] | None = None,
             f"<td>{esc(kind)}</td><td>{' '.join(conns)} {fb_html}</td></tr>"
         )
     diagram = flow_svg(cfg)
+    # Phase 6 guardrail score in the flow header (warnings are non-blocking).
+    try:
+        from platform.flow.models import Flow as _Flow
+        from platform.flow.validator import validate as _validate
+
+        _score = _validate(_Flow.model_validate(cfg)).guardrail_score
+    except Exception:
+        _score = 0
+    score_html = (
+        f'<span class="badge" style="color:var(--warn);'
+        f'border-color:var(--warn)">guardrail score: {_score}</span>')
     return page(
         "Flow editor",
         f"""
@@ -1100,6 +1170,7 @@ def flow_page(cfg: dict, errors: list[str] | None = None,
 <div class="row">
   <button hx-post="/flow/validate" hx-target="#validation"
           hx-swap="innerHTML">Validate flow</button>
+  {score_html}
   <span class="dim">Saved config: configs/finance_employee.json</span>
 </div>
 {validation_panel(errors)}
@@ -1666,9 +1737,102 @@ below the agent's instructions and above its data model block.</p>
     )
 
 
+def roles_page(roles: list[dict], permissions: list[dict], resources: list[str],
+               cycles: dict[str, list[str]], message: str = "",
+               error: str = "", mode: str = "use") -> str:
+    """Phase 6: roles, and the permissions matrix (roles x resources).
+
+    Every cell is an inline toggle - clicking cycles the access level for that
+    role/resource through the levels allowed for that kind. Every change is
+    written to the audit trail as role_permission_changed.
+    """
+    lookup: dict[tuple[str, str], str] = {}
+    for p in permissions:
+        lookup[(str(p["role_name"]), str(p["resource"]))] = str(p["access"])
+
+    def cell(role: dict, resource: str) -> str:
+        rname = str(role["name"])
+        current = lookup.get((rname, resource), "none")
+        kind = next((k for k in cycles if resource.startswith(k)), "tool:")
+        _cycle = cycles[kind]
+        nxt = _cycle[(_cycle.index(current) + 1) % len(_cycle)]
+        cls = {"none": "", "read": "", "write": "btn-write",
+               "approve": "btn-approve"}.get(current, "")
+        return (f'<button class="{cls}" hx-post="/roles/{role["id"]}/permissions" '
+                f'hx-vals=\'{{"resource": "{esc(resource)}"}}\' '
+                f'title="{esc(kind + " " + ", ".join(_cycle))}">'
+                f"{esc(current)} → {esc(nxt)}</button>")
+
+    headers_parts = []
+    for resource in resources:
+        kind = next((k for k in cycles if resource.startswith(k)), "tool:")
+        headers_parts.append(
+            f"<th>{esc(resource)}<br>"
+            f"<span class='dim'>{esc(', '.join(cycles.get(kind, [])))}</span></th>"
+        )
+    headers = "".join(headers_parts)
+    rows = ""
+    for role in roles:
+        cells = "".join(
+            f"<td>{cell(role, resource)}</td>" for resource in resources
+        )
+        rows += (
+            f"<tr><td class='mono'><strong>{esc(role['name'])}</strong></td>"
+            f"<td>{esc(role.get('description') or '')}</td>"
+            f"<td class='dim'>{role['id']}</td>{cells}"
+            f"<td><form method='post' action='/roles/{role['id']}/delete' "
+            f"onsubmit=\"return confirm('Delete role {esc(role['name'])}? "
+            f"It removes all its permissions.')\"><button>Delete</button>"
+            f"</form></td></tr>"
+        )
+    if not rows:
+        rows = '<tr><td colspan="5" class="dim">No roles yet.</td></tr>'
+    options = "".join(
+        f'<option value="{esc(r)}">{esc(r)}</option>'
+        for r in _role_names()
+    )
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Roles",
+        f"""
+<h1>Roles</h1>
+<p class="dim">Roles are shared by humans and agents. An agent node's
+<code>role</code> gates its tool calls and field writes; a session's user role
+gates approvals (within the role's approve limit). <code>kind:*</code> rows act
+as the fallback for a whole kind.</p>
+{msg}{err}
+<h2>Permissions matrix</h2>
+<p class="dim">Click a cell to cycle its level; every change is written to the
+audit trail.</p>
+<div style="overflow-x:auto">
+<table class="matrix">
+<tr><th>Role</th><th>Description</th><th>ID</th>{headers}<th></th></tr>
+{rows}
+</table>
+</div>
+<h2>New role</h2>
+<form method="post" action="/roles" class="row">
+  <select name="role_template" disabled style="display:none">
+    <option value="">{options}</option>
+  </select>
+  <input name="name" placeholder="role name" required
+         pattern="[A-Za-z0-9_-]+" style="flex:2">
+  <input name="description" placeholder="one-line description" style="flex:4">
+  <button class="primary">Add role</button>
+</form>
+<p class="dim">Seeded roles: {esc(", ".join(_role_names())) or "none"}.
+A new role starts with no rows; click tool/field/action cells to grant it
+access, or leave it read-only by assignment.</p>""",
+        active="roles", mode=mode,
+    )
+
+
 _AUDIT_LABELS = {
     "variable_written": "l-write",
     "permission_denied": "l-err",
+    "permission_denied_role": "l-err",
+    "approval_denied_role": "l-err",
     "tool_disabled": "l-err",
     "unknown_tool": "l-err",
     "visit_limit_hit": "l-err",
@@ -1681,6 +1845,9 @@ _AUDIT_LABELS = {
     "verification": "l-info",
     "report_written": "l-info",
     "finish": "l-info",
+    "role_created": "l-write",
+    "role_deleted": "l-write",
+    "role_permission_changed": "l-write",
 }
 
 
@@ -1717,6 +1884,20 @@ def _audit_summary(ev: dict, decision: str | None = None) -> str:
                 f"{json.dumps(ev.get('new'), default=str)}")
     if kind == "permission_denied":
         return f"{ev.get('node')} denied writing '{ev.get('name')}'"
+    if kind == "permission_denied_role":
+        return (f"role {ev.get('role')} blocked tool "
+                f"{ev.get('tool_name')}: {ev.get('reason')}")
+    if kind == "approval_denied_role":
+        return (f"role {ev.get('role')} denied approval"
+                + (f" for {ev.get('amount')}" if ev.get("amount") is not None else "")
+                + f": {ev.get('reason')}")
+    if kind == "role_permission_changed":
+        return (f"{ev.get('role')} · {ev.get('resource')}: "
+                f"{ev.get('old')} → {ev.get('new')}")
+    if kind == "role_created":
+        return f"role {ev.get('role')} created"
+    if kind == "role_deleted":
+        return f"role {ev.get('role')} deleted"
     if kind == "tool_disabled":
         why = ("not enabled for this agent" if ev.get("scope") == "agent"
                else f"not enabled for session {ev.get('tenant')}")

@@ -57,6 +57,14 @@ class AgentNode(BaseModel):
     appends it below the agent's own instructions and above the data model
     block, each labelled with the skill name.
     """
+    role: str = ""
+    """Phase 6: name of this agent's role in the roles table.
+
+    When set, tool calls and data-model field writes are gated by the role's
+    ``role_permissions`` (read-only roles cannot call write tools). When empty
+    the agent keeps the legacy per-agent behaviour, so flows without roles
+    behave exactly as before.
+    """
 
 
 class MessageNode(BaseModel):
@@ -97,6 +105,10 @@ class SessionContextBlock(BaseModel):
     approval_threshold: float
     user_role: str
     tools_enabled: list[str] = Field(default_factory=list)
+    approval_trigger_levels: tuple[str, ...] = ("irreversible_write",)
+    """Permission levels that always require approval (mirrors SessionContext)."""
+    approval_on_amount_over_threshold: bool = True
+    """Gate on amount above threshold as well as on the trigger levels."""
 
     def to_session_context(self) -> SessionContext:
         return SessionContext(
@@ -105,6 +117,8 @@ class SessionContextBlock(BaseModel):
             approval_threshold=self.approval_threshold,
             user_role=self.user_role,
             tools_enabled=tuple(self.tools_enabled),
+            approval_trigger_levels=tuple(self.approval_trigger_levels),
+            approval_on_amount_over_threshold=self.approval_on_amount_over_threshold,
         )
 
 

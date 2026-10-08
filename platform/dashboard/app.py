@@ -18,6 +18,7 @@ from fastapi.responses import (FileResponse, HTMLResponse,
 from fastapi.staticfiles import StaticFiles
 
 from ai_operator.graph import DEFAULT_FLOW_PATH
+from ai_operator import roles
 from ai_operator.llm import get_client
 from ai_operator.permissions import PermissionLevel
 from ai_operator.tools import connectors as connector_tools
@@ -28,6 +29,8 @@ from platform.flow.models import Flow, load_flow
 from platform.flow.validator import SUPPORTED_HTTP_METHODS, validate
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+_APPROVING_ANSWERS = {"y", "yes", "approve", "approved"}
 
 app = FastAPI(title="Comp Ops dashboard")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -268,8 +271,38 @@ async def run_events(run_id: str):
 
 @app.post("/runs/{run_id}/answer", include_in_schema=False)
 def answer_run(request: Request, run_id: str, answer: str = Form(...)):
+    answer = answer.strip()
+    # Phase 6: the approver's role must hold `approve` on the action and stay
+    # within its amount limit. A denied approval is rejected in code - it
+    # never reaches the run - and is traced as approval_denied_role.
+    if answer.lower() in _APPROVING_ANSWERS:
+        row = db.get_run(run_id)
+        session = (db.get_session(int(row["session_id"]))
+                   if row and row.get("session_id") else None)
+        role = str((session or {}).get("user_role") or "")
+        handle = runner.get(run_id)
+        payload = (handle.interrupt if handle is not None else None) or {}
+        if role and payload.get("kind") == "approval":
+            amount = roles.approval_amount(payload.get("tool_args"))
+            can_approve, reason = roles.approve_gate(role, amount)
+            if not can_approve:
+                from ai_operator.tracing import TraceLogger
+                TraceLogger(run_id).event(
+                    "approval_denied_role", role=role, reason=reason,
+                    tool_name=payload.get("tool_name", ""),
+                    amount=amount,
+                )
+                return HTMLResponse(
+                    html.page("Approval denied",
+                              f'<h1 class="err">requires a higher role</h1>'
+                              f'<p>{html.esc(role)} cannot approve this payment: '
+                              f"{html.esc(reason)}.</p>"
+                              f'<p><a href="/runs/{html.esc(run_id)}">'
+                              f"Back to run</a></p>", active="runs"),
+                    status_code=403,
+                )
     try:
-        runner.answer_run(run_id, answer.strip())
+        runner.answer_run(run_id, answer)
     except RuntimeError as exc:
         return HTMLResponse(
             html.page("Run",
@@ -421,6 +454,93 @@ def skills_delete(name: str):
     return RedirectResponse("/skills", status_code=303)
 
 
+# --- roles and permissions matrix (Phase 6) ---------------------------------
+
+_RESOURCE_KINDS = {
+    "tool:": "none, read, write",
+    "field:": "none, read, write",
+    "action:": "none, approve",
+}
+
+
+def _role_resources() -> list[str]:
+    """The matrix columns: registered tools, data-model fields, named actions."""
+    resources: set[str] = set()
+    try:
+        from ai_operator.tools.registry import names as tool_names
+        resources.update(f"tool:{t}" for t in tool_names())
+    except Exception:
+        pass
+    try:
+        from ai_operator import datamodel
+        for m in datamodel.load_models():
+            for f in m.fields:
+                resources.add(f"field:{m.name}.{f.name}")
+    except Exception:
+        pass
+    resources.add("action:approve_payment")
+    return sorted(resources)
+
+
+def _cycles() -> dict[str, list[str]]:
+    return {
+        "tool:": ["none", "read", "write"],
+        "field:": ["none", "read", "write"],
+        "action:": ["none", "approve"],
+    }
+
+
+@app.get("/roles", response_class=HTMLResponse, include_in_schema=False)
+def roles_page(request: Request, message: str = "", error: str = "") -> str:
+    perms = db.list_role_permissions()
+    return html.roles_page(
+        db.list_roles(), perms, _role_resources(), _cycles(),
+        message=message, error=error, mode=_mode(request))
+
+
+@app.post("/roles", response_class=HTMLResponse, include_in_schema=False)
+def roles_create(name: str = Form(...), description: str = Form("")) -> Response:
+    name = name.strip()
+    if not name:
+        return html.roles_page(
+            db.list_roles(), db.list_role_permissions(), _role_resources(),
+            _cycles(), error="A role needs a name.")
+    if db.get_role(name):
+        return html.roles_page(
+            db.list_roles(), db.list_role_permissions(), _role_resources(),
+            _cycles(), error=f"A role named '{name}' already exists.")
+    role_id = db.add_role(name, description)
+    _audit_event("role_created", role=name, role_id=role_id)
+    return RedirectResponse("/roles", status_code=303)
+
+
+@app.post("/roles/{role_id}/delete", response_class=HTMLResponse,
+          include_in_schema=False)
+def roles_delete(role_id: int) -> Response:
+    role = next((r for r in db.list_roles() if r["id"] == role_id), None)
+    name = str((role or {}).get("name") or role_id)
+    db.delete_role(role_id)
+    _audit_event("role_deleted", role=name, role_id=role_id)
+    return RedirectResponse("/roles", status_code=303)
+
+
+@app.post("/roles/{role_id}/permissions", response_class=HTMLResponse,
+          include_in_schema=False)
+def roles_permission_toggle(role_id: int, resource: str = Form(...)) -> Response:
+    role = next((r for r in db.list_roles() if r["id"] == role_id), None)
+    role_name = str((role or {}).get("name") or role_id)
+    perms = {p["resource"]: p["access"] for p in db.list_role_permissions()
+             if p["role_id"] == role_id}
+    kind = next((k for k in _cycles() if resource.startswith(k)), "tool:")
+    cycle = _cycles()[kind]
+    current = perms.get(resource, "none")
+    nxt = cycle[(cycle.index(current) + 1) % len(cycle)]
+    db.set_role_permission(role_id, resource, nxt)
+    _audit_event("role_permission_changed", role=role_name, resource=resource,
+                 old=current, new=nxt)
+    return RedirectResponse("/roles", status_code=303)
+
+
 @app.get("/runs/{run_id}/trace", include_in_schema=False)
 def run_trace(run_id: str):
     path = RUNS_ROOT / run_id / "trace.jsonl"
@@ -495,8 +615,10 @@ def toggle_tool(node_id: str, tool: str):
         errors = [str(exc)]
     if errors:
         node["tools_enabled"] = original
+        detail = (list(errors.errors) if hasattr(errors, "errors")
+                  else list(errors))
         return html.tool_badge(node_id, tool, tool in original,
-                               note=errors[0])
+                               note=detail[0] if detail else "invalid config")
     DEFAULT_FLOW_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     return html.tool_badge(node_id, tool, tool in tools)
 
@@ -519,6 +641,15 @@ def sessions_create(tenant: str = Form(...), currency: str = Form(...),
         return HTMLResponse(
             html.sessions_page(db.list_sessions(),
                                error="Approval threshold must be a number."),
+            status_code=400,
+        )
+    # Phase 6: a session's user_role must reference a real role.
+    if not roles.role_exists(user_role.strip()):
+        return HTMLResponse(
+            html.sessions_page(
+                db.list_sessions(),
+                error=f"'{user_role.strip()}' is not a role in the roles "
+                      "table (add it on the Roles page first)."),
             status_code=400,
         )
     db.add_session(tenant.strip(), currency.strip(), threshold, user_role.strip())
@@ -777,6 +908,31 @@ def audit_page(request: Request, run_id: str = "", node: str = "",
     events = _audit_events(run_id=run_id, node=node, event=event)
     return html.audit_page(events, run_id=run_id, node=node, event=event,
                            mode=_mode(request))
+
+
+def _audit_event(event_type: str, **fields: Any) -> None:
+    """Append a platform (non-run) event so it shows on the audit trail.
+
+    Config changes like role-permission toggles live in a synthetic
+    RUNS_ROOT/_config/trace.jsonl read by the same _audit_events glob.
+    """
+    import time as _time
+
+    try:
+        RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+        path = RUNS_ROOT / "_config" / "trace.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": _time.time(),
+            "time": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "run_id": "_config",
+            "event": event_type,
+            **fields,
+        }
+        with path.open("a") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        pass
 
 
 def _audit_events(run_id: str = "", node: str = "", event: str = "",

@@ -204,12 +204,14 @@ def _add_agent(
             if decision.get("action_type") in ("verify", "finish"):
                 answer = decision.get("expected_outcome") or decision.get("thought") or ""
                 updates.update(write_variable(state, nid, node.save_as, answer,
-                                              model=node.data_model))
+                                              model=node.data_model,
+                                              role=node.role or None))
         return updates
 
     def execute_node(state: AgentState, config: RunnableConfig) -> dict:
         browser_tools.pin_agent(nid)
-        return execute.run_execute(state, config, allowed_tools=allowed_tools)
+        return execute.run_execute(state, config, allowed_tools=allowed_tools,
+                                   role=node.role or None)
 
     def ask_node(state: AgentState) -> dict:
         browser_tools.pin_agent(nid)

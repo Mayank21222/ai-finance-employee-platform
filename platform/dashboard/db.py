@@ -32,6 +32,40 @@ SEED_CONNECTOR = {
     }],
 }
 
+# Phase 6: roles shared by humans and agents (Improvements.md section 1).
+# The three mandated roles first, then the roles the shipped sessions and
+# flows already use so nothing existing has to be renamed.
+SEED_ROLES: dict[str, str] = {
+    "finance_manager": "Approves payments of any amount; writes every field "
+                       "and tool.",
+    "ap_clerk": "Accounts-payable clerk: writes invoice fields and tools, "
+                "approves small payments.",
+    "auditor": "Read-only: reads fields and tools, cannot write or approve.",
+    "finance_operator": "Default dashboard session role: writes tools, "
+                        "approves up to 1,000,000.",
+    "viewer": "Read-only dashboard user: no write, no approval.",
+}
+
+# (role, resource, access, approve_limit_amount). `kind:*` is the fallback for
+# that kind; `field:Invoice.*` narrows it for the shipped data model.
+SEED_ROLE_PERMISSIONS: list[tuple[str, str, str, float | None]] = [
+    ("finance_manager", "tool:*", "write", None),
+    ("finance_manager", "field:*", "write", None),
+    ("finance_manager", "action:approve_payment", "approve", None),
+    ("ap_clerk", "tool:*", "write", None),
+    ("ap_clerk", "field:*", "read", None),
+    ("ap_clerk", "field:Invoice.*", "write", None),
+    ("ap_clerk", "action:approve_payment", "approve", 25000.0),
+    ("auditor", "tool:*", "read", None),
+    ("auditor", "field:*", "read", None),
+    ("auditor", "action:approve_payment", "none", None),
+    ("finance_operator", "tool:*", "write", None),
+    ("finance_operator", "field:*", "write", None),
+    ("finance_operator", "action:approve_payment", "approve", 1000000.0),
+    ("viewer", "tool:*", "read", None),
+    ("viewer", "field:*", "read", None),
+]
+
 
 def db_path() -> Path:
     return Path(os.environ.get("DASH_DB") or DEFAULT_DB)
@@ -98,6 +132,21 @@ def init_db() -> None:
                 body TEXT NOT NULL,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role_id INTEGER NOT NULL REFERENCES roles(id)
+                    ON DELETE CASCADE,
+                resource TEXT NOT NULL,
+                access TEXT NOT NULL DEFAULT 'none',
+                approve_limit_amount REAL,
+                UNIQUE(role_id, resource)
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -134,6 +183,65 @@ def init_db() -> None:
                  json.dumps(SEED_CONNECTOR["headers"]),
                  json.dumps(SEED_CONNECTOR["endpoints"]), time.time()),
             )
+        _seed_roles(con)
+
+
+def _seed_roles(con: sqlite3.Connection) -> None:
+    """Phase 6: seed roles once, then migrate Phase 4 field permissions.
+
+    Both halves run only while their table is empty, so a permission a human
+    later changes on the matrix page is never silently re-granted on restart.
+    The migration reads the stored per-field ``write_agents``/``read_agents``
+    and the agent's ``role`` in the flow config and turns them into rows -
+    after this point the roles table, not the agent list, is the source.
+    """
+    if con.execute("SELECT COUNT(*) AS n FROM roles").fetchone()["n"] == 0:
+        now = time.time()
+        for name, description in SEED_ROLES.items():
+            con.execute(
+                "INSERT INTO roles (name, description, created_at) "
+                "VALUES (?, ?, ?)", (name, description, now))
+    if con.execute("SELECT COUNT(*) AS n FROM role_permissions").fetchone()["n"]:
+        return
+    role_ids = {r["name"]: r["id"] for r in list_roles(con=con)}
+    grants: dict[tuple[str, str], tuple[str, float | None]] = {}
+    for role, resource, access, limit in SEED_ROLE_PERMISSIONS:
+        grants[(role, resource)] = (access, limit)
+    grants.update(_migrated_field_grants())
+    for (role, resource), (access, limit) in grants.items():
+        role_id = role_ids.get(role)
+        if role_id is None:
+            continue
+        con.execute(
+            "INSERT OR IGNORE INTO role_permissions (role_id, resource, "
+            "access, approve_limit_amount) VALUES (?, ?, ?, ?)",
+            (role_id, resource, access, limit))
+
+
+def _migrated_field_grants() -> dict[tuple[str, str], tuple[str, float | None]]:
+    """Phase 4 field write/read agent lists, expressed as role permissions."""
+    grants: dict[tuple[str, str], tuple[str, float | None]] = {}
+    try:
+        from ai_operator import datamodel
+        from platform.flow.models import load_flow
+        roles_by_node = {n.node_id: n.role for n in load_flow().nodes
+                         if getattr(n, "role", "")}
+        models = datamodel.load_models()
+    except Exception:
+        return grants
+    rank = {"read": 1, "write": 2}
+    for model in models:
+        for field in model.fields:
+            for access, agents in (("write", field.write_agents),
+                                   ("read", field.read_agents)):
+                for agent in agents:
+                    role = roles_by_node.get(agent)
+                    if not role:
+                        continue
+                    key = (role, f"field:{model.name}.{field.name}")
+                    if rank[access] >= rank.get(grants.get(key, ("none",))[0], 0):
+                        grants[key] = (access, None)
+    return grants
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -453,3 +561,77 @@ def mark_schedule_run(schedule_id: int, run_id: str) -> None:
             "UPDATE schedules SET last_run_at = ?, last_run_id = ? WHERE id = ?",
             (time.time(), run_id, schedule_id),
         )
+
+
+# --- Phase 6: roles and role permissions ------------------------------------
+
+
+def list_roles(con: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    if con is None:
+        with connect() as c:
+            return list_roles(c)
+    rows = con.execute("SELECT * FROM roles ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_role(name: str) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM roles WHERE name = ?",
+                          (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_role(name: str, description: str = "") -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO roles (name, description, created_at) "
+            "VALUES (?, ?, ?)", (name.strip(), description.strip(), time.time()))
+        return int(cur.lastrowid)
+
+
+def delete_role(role_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM roles WHERE id = ?", (role_id,))
+        con.execute("DELETE FROM role_permissions WHERE role_id = ?",
+                    (role_id,))
+
+
+def list_role_permissions(con: sqlite3.Connection | None = None) -> list[dict]:
+    if con is None:
+        with connect() as c:
+            return list_role_permissions(c)
+    rows = con.execute(
+        "SELECT p.id, r.name AS role_name, p.role_id, p.resource, p.access, "
+        "p.approve_limit_amount FROM role_permissions p "
+        "JOIN roles r ON r.id = p.role_id ORDER BY r.name, p.resource"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def role_permission_map() -> dict[str, dict[str, tuple[str, float | None]]]:
+    """role name -> {resource: (access, approve_limit_amount)} (Phase 6)."""
+    out: dict[str, dict[str, tuple[str, float | None]]] = {}
+    for row in list_role_permissions():
+        out.setdefault(str(row["role_name"]), {})[str(row["resource"])] = (
+            str(row["access"]),
+            row["approve_limit_amount"],
+        )
+    return out
+
+
+def set_role_permission(role_id: int, resource: str, access: str,
+                        limit: float | None = None) -> None:
+    with connect() as con:
+        cur = con.execute(
+            "SELECT id FROM role_permissions WHERE role_id = ? AND resource = ?",
+            (role_id, resource))
+        existing = cur.fetchone()
+        if existing:
+            con.execute(
+                "UPDATE role_permissions SET access = ?, approve_limit_amount = ? "
+                "WHERE id = ?", (access, limit, existing["id"]))
+        else:
+            con.execute(
+                "INSERT INTO role_permissions (role_id, resource, access, "
+                "approve_limit_amount) VALUES (?, ?, ?, ?)",
+                (role_id, resource, access, limit))

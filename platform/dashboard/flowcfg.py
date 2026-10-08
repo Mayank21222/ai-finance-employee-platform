@@ -25,9 +25,9 @@ def save_cfg(cfg: dict) -> list[str]:
         flow = Flow.model_validate(cfg)
     except Exception as exc:
         return [str(exc)]
-    errors = validate(flow)
-    if errors:
-        return errors
+    result = validate(flow)
+    if result.errors:  # warnings are non-blocking and never stop a save
+        return list(result.errors)
     DEFAULT_FLOW_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     return []
 

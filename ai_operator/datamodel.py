@@ -151,7 +151,7 @@ def prompt_block(name: str) -> str:
 
 
 def write_permission(node: str, var_name: str,
-                     model: str | None = None) -> str:
+                     model: str | None = None, role: str | None = None) -> str:
     """Return 'write', 'deny' or '' for a variable write attempt.
 
     A variable that belongs to the writing agent's data model may only be
@@ -159,6 +159,10 @@ def write_permission(node: str, var_name: str,
     that are not model fields (task_type, checklist answers) are unrestricted.
     When the agent declares no data model, every configured model is checked,
     so a reader-only agent still cannot write a tracked field.
+
+    Phase 6: when `role` is given, the field's role_permissions row is the
+    source of truth (checked before the legacy write_agents list); a read-only
+    role is denied even if it somehow appears in a field's write_agents.
     """
     models = load_models()
     if model is not None:
@@ -170,6 +174,12 @@ def write_permission(node: str, var_name: str,
         field = fields.get(var_name)
         if field is None:
             continue
+        if role:
+            from ai_operator import roles
+            reason = roles.field_gate(role, m.name, var_name, "write")
+            if reason is not None:
+                return "deny"
+            return "write"
         if node in field.write_agents:
             return "write"
         return "deny"

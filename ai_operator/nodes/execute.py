@@ -23,6 +23,7 @@ def run_execute(
     state: AgentState,
     config: RunnableConfig,
     allowed_tools: tuple[str, ...] = (),
+    role: str | None = None,
 ) -> dict:
     run_id = state["run_id"]
     step = int(state.get("step_count", 0))
@@ -42,6 +43,23 @@ def run_execute(
             "last_observation": observation,
             "history": [{"step": step, "kind": "error", "detail": f"unknown tool {tool_name}", "ok": False}],
         }
+
+    if role:
+        from ai_operator import roles as role_permissions
+        blocked = role_permissions.tool_gate(role, spec.name, spec.level)
+        if blocked:
+            observation = (
+                f"ROLE PERMISSION DENIED for tool {spec.name!r}: {blocked}. "
+                "Do not call it; use a permitted tool or ask a human."
+            )
+            trace_event(run_id, "permission_denied_role", step=step,
+                        tool_name=spec.name, role=role, reason=blocked)
+            return {
+                "last_observation": observation,
+                "history": [{"step": step, "kind": "error",
+                             "detail": f"role {role} blocked tool {spec.name}",
+                             "ok": False}],
+            }
 
     if allowed_tools and spec.name not in allowed_tools:
         observation = (

@@ -21,15 +21,16 @@ from ai_operator.tracing import trace_event
 
 
 def write_variable(state: AgentState, node: str, name: str, value: Any,
-                   model: str | None = None) -> dict:
+                   model: str | None = None, role: str | None = None) -> dict:
     """Return a state update that sets one session variable, traced with old/new.
 
     Returns a permission_denied update (variable untouched) when the writing
     node is not allowed to write a data-model field with this name. `model` is
-    the writing agent's declared data model (its extraction contract).
+    the writing agent's declared data model (its extraction contract); `role`
+    (Phase 6) makes the check role-based instead of node-list based.
     """
     variables = dict(state.get("variables") or {})
-    denied = write_permission(node, name, model)
+    denied = write_permission(node, name, model, role=role)
     if denied == "deny":
         detail = (
             f"Agent '{node}' is not allowed to write '{name}' (data model "
