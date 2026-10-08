@@ -1212,3 +1212,86 @@ the variable write path.</p>
 </form>""",
         active="models", mode=mode,
     )
+
+
+def connectors_page(connectors: list[dict], error: str = "",
+                    message: str = "", mode: str = "use") -> str:
+    """Phase 4: the connector registry page.
+
+    A connector is a base URL configured once; its endpoints become tools in
+    the registry (toggleable per agent on the Agents page) and are projected
+    into the flow config so the next run registers them.
+    """
+    methods = ("GET", "POST", "PUT", "PATCH", "DELETE")
+    levels = ("read", "reversible_write", "irreversible_write")
+    cards = []
+    for conn in connectors:
+        cid = conn["id"]
+        rows = []
+        for ep in conn.get("endpoints") or []:
+            rows.append(
+                f'<tr><td class="mono"><strong>{esc(ep.get("name"))}</strong>'
+                f'</td><td class="mono">{esc(ep.get("method") or "GET")}</td>'
+                f'<td class="mono">{esc(ep.get("path") or "")}</td>'
+                f"<td>{esc(ep.get('level') or 'read')}</td>"
+                f"<td>{esc(ep.get('description') or '')}</td>"
+                f'<td class="dim">{esc(ep.get("response_fields") or "")}</td>'
+                f'<td><form method="post" action="/connectors/{cid}/'
+                f'endpoints/{esc(ep.get("name"))}/delete"><button>×</button>'
+                f"</form></td></tr>"
+            ) or ('<tr><td colspan="7" class="dim">No endpoints yet.</td>'
+                  "</tr>")
+        method_opts = "".join(
+            f'<option value="{m}">{m}</option>' for m in methods)
+        level_opts = "".join(
+            f'<option value="{lv}">{lv}</option>' for lv in levels)
+        cards.append(f"""
+<div class="panel" id="connector-{cid}">
+  <div class="row" style="justify-content:space-between">
+    <h2 style="margin:0">{esc(conn["name"])}</h2>
+    <div class="row">
+      <span class="dim mono">{esc(conn["base_url"])}</span>
+      <form method="post" action="/connectors/{cid}/delete"
+            class="row" style="display:inline"
+            onsubmit="return confirm('Delete connector {esc(conn["name"])}?')">
+        <button>Delete connector</button></form>
+    </div>
+  </div>
+  <table>
+  <tr><th>Tool name</th><th>Method</th><th>Path</th><th>Permission</th>
+  <th>Description</th><th>Response fields</th><th></th></tr>
+  {"".join(rows)}
+  </table>
+  <form method="post" action="/connectors/{cid}/endpoints" class="row">
+    <input name="name" placeholder="tool name" required pattern="[A-Za-z0-9_]+">
+    <select name="method">{method_opts}</select>
+    <input name="path" placeholder="/api/path?tenant={{{{session.tenant}}}}"
+           required style="flex:2">
+    <select name="level">{level_opts}</select>
+    <input name="description" placeholder="what it does" style="flex:2">
+    <input name="response_fields" placeholder="response fields it reads">
+    <button class="primary">Add endpoint</button>
+  </form>
+</div>""")
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Connectors",
+        f"""
+<h1>Connectors</h1>
+{msg}{err}
+<p class="dim">A connector is an external API configured once by base URL;
+each endpoint becomes a tool in the registry - it shows up as a toggle on the
+Agents page and is available to agents from the next run.</p>
+{"".join(cards) or '<p class="dim">No connectors yet.</p>'}
+<h2>New connector</h2>
+<form method="post" action="/connectors" class="row">
+  <input name="name" placeholder="name (e.g. ERP System)" required
+         pattern="[A-Za-z0-9_]+">
+  <input name="base_url" placeholder="base URL" value="{{{{app.base_url}}}}"
+         required style="flex:2">
+  <input name="headers" placeholder='default headers JSON' value="&#123;&#125;">
+  <button class="primary">Create connector</button>
+</form>""",
+        active="connectors", mode=mode,
+    )

@@ -315,3 +315,83 @@ def test_visual_flow_editor_clickable_nodes_and_save():
     finally:
         if DEFAULT_FLOW_PATH.read_text() != original:
             DEFAULT_FLOW_PATH.write_text(original)
+
+
+def test_connector_registry_page_loads_into_tool_registry():
+    """Mandated Phase 4 test: the connector registry page - DB connectors
+    load into the tool registry, endpoints become toggleable tools, and the
+    definitions are projected into the flow config for the next run."""
+    from ai_operator.graph import DEFAULT_FLOW_PATH
+    from ai_operator.tools.registry import names as registry_names
+    from platform.dashboard import flowcfg
+
+    original = DEFAULT_FLOW_PATH.read_text()
+    try:
+        # The shipped example appears on the page (Improvements.md: Mock
+        # Payables System with one GET /api/invoices endpoint, read level).
+        body = client.get("/connectors").text
+        assert "Mock Payables System" in body
+        assert "get_invoice_list" in body
+        assert "/api/invoices" in body
+        assert "response fields" in body.lower()
+
+        # Loading the DB registry puts its endpoints in the tool registry.
+        # (The startup hook does this; TestClient does not run lifespan
+        # hooks, so the same entry point is exercised directly.)
+        assert flowcfg.publish_connectors() == []
+        assert "get_invoice_list" in registry_names()
+
+        # Create a connector and an endpoint through the page.
+        resp = client.post("/connectors", data={
+            "name": "ScratchERP", "base_url": "{{app.base_url}}",
+            "headers": "{}"}, follow_redirects=False)
+        assert resp.status_code == 303
+        cid = next(c["id"] for c in db.list_connectors()
+                   if c["name"] == "ScratchERP")
+        resp = client.post(f"/connectors/{cid}/endpoints", data={
+            "name": "scratch_lookup", "method": "GET",
+            "path": "/api/invoices", "level": "read",
+            "description": "scratch endpoint"}, follow_redirects=False)
+        assert resp.status_code == 303
+        # Registered immediately and visible as a tool toggle for agents.
+        assert "scratch_lookup" in registry_names()
+        assert "scratch_lookup" in client.get("/agents").text
+        # Projected into the flow config (what compile_flow registers).
+        cfg = json.loads(DEFAULT_FLOW_PATH.read_text())
+        assert any(c.get("name") == "scratch_lookup"
+                   for c in cfg.get("connectors", []))
+
+        # Duplicate and reserved names are refused, config untouched.
+        resp = client.post(f"/connectors/{cid}/endpoints", data={
+            "name": "scratch_lookup", "method": "GET", "path": "/api/other",
+            "level": "read"})
+        assert resp.status_code == 400 and "already exists" in resp.text
+        resp = client.post(f"/connectors/{cid}/endpoints", data={
+            "name": "read_file", "method": "GET", "path": "/api/x"})
+        assert resp.status_code == 400 and "reserved" in resp.text
+        resp = client.post(f"/connectors/{cid}/endpoints", data={
+            "name": "bad level", "method": "GET", "path": "/api/x",
+            "level": "root"})
+        assert resp.status_code == 400
+
+        # Deleting the endpoint removes it from the registry AND the config.
+        resp = client.post(
+            f"/connectors/{cid}/endpoints/scratch_lookup/delete",
+            follow_redirects=False)
+        assert resp.status_code == 303
+        assert "scratch_lookup" not in registry_names()
+        cfg = json.loads(DEFAULT_FLOW_PATH.read_text())
+        assert not any(c.get("name") == "scratch_lookup"
+                       for c in cfg.get("connectors", []))
+
+        # Deleting the connector clears the row.
+        resp = client.post(f"/connectors/{cid}/delete", follow_redirects=False)
+        assert resp.status_code == 303
+        assert db.get_connector(cid) is None
+    finally:
+        for row in db.list_connectors():
+            if row["name"] == "ScratchERP":
+                db.delete_connector(row["id"])
+        if DEFAULT_FLOW_PATH.read_text() != original:
+            DEFAULT_FLOW_PATH.write_text(original)
+        flowcfg.sync_registry()  # registry back to the pristine config state

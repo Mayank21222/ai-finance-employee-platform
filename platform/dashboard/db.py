@@ -1,10 +1,11 @@
-"""SQLite storage for dashboard sessions and run history.
+"""SQLite storage for dashboard sessions, run history and connectors.
 
 Path override via DASH_DB env var so tests never touch the real file.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -13,6 +14,23 @@ from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB = _REPO_ROOT / "dashboard.db"
+
+# Phase 4: the shipped example connector (Improvements.md) - the mock
+# payables system's read API, shown active in the demo.
+SEED_CONNECTOR = {
+    "name": "Mock Payables System",
+    "base_url": "{{app.base_url}}",
+    "headers": {"Accept": "application/json"},
+    "endpoints": [{
+        "name": "get_invoice_list",
+        "description": ("Get invoice list - fetch the current invoice list "
+                        "from the accounting API (mock app, read-only)."),
+        "method": "GET",
+        "path": "/api/invoices?tenant={{session.tenant}}",
+        "level": "read",
+        "response_fields": "vendor, amount",
+    }],
+}
 
 
 def db_path() -> Path:
@@ -46,6 +64,14 @@ def init_db() -> None:
                 created_at REAL NOT NULL,
                 finished_at REAL
             );
+            CREATE TABLE IF NOT EXISTS connectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                base_url TEXT NOT NULL,
+                headers TEXT NOT NULL DEFAULT '{}',
+                endpoints TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -61,6 +87,15 @@ def init_db() -> None:
                 "INSERT INTO sessions (tenant, currency, approval_threshold, "
                 "user_role, created_at) VALUES (?, ?, ?, ?, ?)",
                 ("acme", "INR", 50000.0, "finance_operator", time.time()),
+            )
+        row = con.execute("SELECT COUNT(*) AS n FROM connectors").fetchone()
+        if row["n"] == 0:
+            con.execute(
+                "INSERT INTO connectors (name, base_url, headers, endpoints, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (SEED_CONNECTOR["name"], SEED_CONNECTOR["base_url"],
+                 json.dumps(SEED_CONNECTOR["headers"]),
+                 json.dumps(SEED_CONNECTOR["endpoints"]), time.time()),
             )
 
 
@@ -150,3 +185,73 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             (run_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# --- connectors registry (Phase 4) -----------------------------------------
+
+
+def _connector_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["headers"] = json.loads(data.get("headers") or "{}")
+    except ValueError:
+        data["headers"] = {}
+    try:
+        data["endpoints"] = json.loads(data.get("endpoints") or "[]")
+    except ValueError:
+        data["endpoints"] = []
+    return data
+
+
+def list_connectors() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT * FROM connectors ORDER BY id").fetchall()
+    return [_connector_row(r) for r in rows]
+
+
+def get_connector(connector_id: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM connectors WHERE id = ?",
+                          (connector_id,)).fetchone()
+    return _connector_row(row) if row else None
+
+
+def add_connector(name: str, base_url: str, headers: dict[str, str],
+                  endpoints: list[dict[str, Any]] | None = None) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO connectors (name, base_url, headers, endpoints, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (name, base_url, json.dumps(headers),
+             json.dumps(endpoints or []), time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def delete_connector(connector_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM connectors WHERE id = ?", (connector_id,))
+
+
+def add_endpoint(connector_id: int, endpoint: dict[str, Any]) -> None:
+    row = get_connector(connector_id)
+    if row is None:
+        raise KeyError(connector_id)
+    endpoints = list(row["endpoints"]) + [endpoint]
+    with connect() as con:
+        con.execute("UPDATE connectors SET endpoints = ? WHERE id = ?",
+                    (json.dumps(endpoints), connector_id))
+
+
+def delete_endpoint(connector_id: int, endpoint_name: str) -> bool:
+    row = get_connector(connector_id)
+    if row is None:
+        return False
+    endpoints = [e for e in row["endpoints"] if e.get("name") != endpoint_name]
+    if len(endpoints) == len(row["endpoints"]):
+        return False
+    with connect() as con:
+        con.execute("UPDATE connectors SET endpoints = ? WHERE id = ?",
+                    (json.dumps(endpoints), connector_id))
+    return True

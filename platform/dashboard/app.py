@@ -18,10 +18,12 @@ from fastapi.responses import (FileResponse, HTMLResponse,
 from fastapi.staticfiles import StaticFiles
 
 from ai_operator.graph import DEFAULT_FLOW_PATH
+from ai_operator.permissions import PermissionLevel
+from ai_operator.tools import connectors as connector_tools
 from ai_operator.tracing import RUNS_ROOT
 from platform.dashboard import db, flowcfg, html, runner
 from platform.flow.models import Flow, load_flow
-from platform.flow.validator import validate
+from platform.flow.validator import SUPPORTED_HTTP_METHODS, validate
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -32,6 +34,11 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    # Phase 4: the DB connector registry is loaded into the tool registry and
+    # projected into the flow config so the next run registers those tools.
+    connector_errors = flowcfg.publish_connectors()
+    if connector_errors:
+        print(f"[dashboard] connector registry: {'; '.join(connector_errors)}")
     flipped = runner.reconcile()
     if flipped:
         print(f"[dashboard] interrupted (orphaned) runs: {flipped}")
@@ -553,6 +560,114 @@ def models_delete_field(request: Request, name: str, field: str):
     model.fields = [f for f in model.fields if f.name != field]
     datamodel.save_models(models)
     return RedirectResponse("/models", status_code=303)
+
+
+# --- connectors registry (Phase 4) ------------------------------------------
+
+
+def _connectors_error(errors: list[str]) -> Response:
+    return HTMLResponse(
+        html.connectors_page(db.list_connectors(), error="; ".join(errors)),
+        status_code=400,
+    )
+
+
+@app.get("/connectors", response_class=HTMLResponse, include_in_schema=False)
+def connectors_page(request: Request) -> str:
+    return html.connectors_page(db.list_connectors(), mode=_mode(request))
+
+
+@app.post("/connectors", include_in_schema=False)
+def connectors_create(name: str = Form(...), base_url: str = Form(...),
+                      headers: str = Form("{}")):
+    name = name.strip()
+    errors: list[str] = []
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        errors.append("Connector name must be letters, digits or underscores.")
+    if any(c["name"] == name for c in db.list_connectors()):
+        errors.append(f"Connector '{name}' already exists.")
+    try:
+        parsed = json.loads(headers or "{}")
+        if not isinstance(parsed, dict):
+            raise ValueError("not a JSON object")
+    except ValueError as exc:
+        errors.append(f"Default headers must be a JSON object ({exc}).")
+    base_url = base_url.strip()
+    if not base_url or " " in base_url:
+        errors.append("Base URL is required and must not contain spaces.")
+    if errors:
+        return _connectors_error(errors)
+    connector_id = db.add_connector(name, base_url, parsed)
+    publish_errors = flowcfg.publish_connectors()
+    if publish_errors:
+        db.delete_connector(connector_id)  # rollback: never persist a
+        return _connectors_error(publish_errors)  # connector that cannot publish
+    return RedirectResponse("/connectors", status_code=303)
+
+
+@app.post("/connectors/{connector_id}/delete", include_in_schema=False)
+def connectors_delete(connector_id: int):
+    if db.get_connector(connector_id) is None:
+        return Response(status_code=404)
+    db.delete_connector(connector_id)
+    flowcfg.publish_connectors()
+    return RedirectResponse("/connectors", status_code=303)
+
+
+@app.post("/connectors/{connector_id}/endpoints", include_in_schema=False)
+def connectors_add_endpoint(connector_id: int,
+                            name: str = Form(...),
+                            method: str = Form("GET"),
+                            path: str = Form(...),
+                            level: str = Form("read"),
+                            description: str = Form(""),
+                            response_fields: str = Form("")):
+    if db.get_connector(connector_id) is None:
+        return Response(status_code=404)
+    name = name.strip()
+    errors: list[str] = []
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        errors.append("Tool name must be letters, digits or underscores.")
+    existing = {e.get("name") for c in db.list_connectors()
+                for e in c.get("endpoints") or []}
+    if name in existing:
+        errors.append(f"A tool named '{name}' already exists.")
+    from ai_operator.tools.registry import names as registry_names
+
+    reserved = (set(registry_names()) - connector_tools.registered_names())
+    if name in reserved:
+        errors.append(f"'{name}' is a built-in tool name and is reserved.")
+    if method.upper() not in SUPPORTED_HTTP_METHODS:
+        errors.append(
+            f"Unsupported method '{method}' "
+            f"(supported: {', '.join(SUPPORTED_HTTP_METHODS)}).")
+    if level not in PermissionLevel._value2member_map_:
+        errors.append(f"Invalid permission level '{level}' "
+                      "(read, reversible_write, irreversible_write).")
+    path = path.strip()
+    if not path or " " in path:
+        errors.append("Path is required and must not contain spaces.")
+    if errors:
+        return _connectors_error(errors)
+    endpoint = {
+        "name": name, "method": method.upper(), "path": path,
+        "level": level, "description": description.strip(),
+        "response_fields": response_fields.strip(),
+    }
+    db.add_endpoint(connector_id, endpoint)
+    publish_errors = flowcfg.publish_connectors()
+    if publish_errors:
+        db.delete_endpoint(connector_id, name)
+        return _connectors_error(publish_errors)
+    return RedirectResponse("/connectors", status_code=303)
+
+
+@app.post("/connectors/{connector_id}/endpoints/{endpoint_name}/delete",
+          include_in_schema=False)
+def connectors_delete_endpoint(connector_id: int, endpoint_name: str):
+    db.delete_endpoint(connector_id, endpoint_name)
+    flowcfg.publish_connectors()
+    return RedirectResponse("/connectors", status_code=303)
 
 
 # --- flow editor -----------------------------------------------------------
