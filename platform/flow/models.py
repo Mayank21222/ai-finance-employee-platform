@@ -138,6 +138,13 @@ class ConnectorDef(BaseModel):
     body: str = ""
     level: str = "read"
     timeout: float = 15.0
+    managed_by: str | None = None
+    """Set to 'dashboard' for connectors mirrored from the DB registry.
+
+    Declared so round trips (`fin flow import`, config export) preserve the
+    marker instead of silently dropping it - losing it would make a
+    dashboard-managed connector undeletable from the connectors page.
+    """
 
 
 class Flow(BaseModel):
