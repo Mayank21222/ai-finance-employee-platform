@@ -12,9 +12,10 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse,
-                               RedirectResponse, Response, StreamingResponse)
+                               JSONResponse, RedirectResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from ai_operator.graph import DEFAULT_FLOW_PATH
@@ -234,39 +235,66 @@ def run_detail(run_id: str, request: Request):
 
 @app.get("/runs/{run_id}/events", include_in_schema=False)
 async def run_events(run_id: str):
+    return StreamingResponse(_sse_gen(run_id),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                     "X-Accel-Buffering": "no"})
+
+
+async def _sse_gen(run_id: str):
+    """Tail trace.jsonl as SSE until the run is terminal (Phase 6: shared by
+    the run console and the versioned API's events endpoint)."""
     trace_path = RUNS_ROOT / run_id / "trace.jsonl"
+    offset = 0
+    last_data = time.monotonic()
+    while True:
+        new = b""
+        try:
+            with trace_path.open("rb") as fh:
+                fh.seek(offset)
+                new = fh.read()
+                offset = fh.tell()
+        except OSError:
+            pass
+        if new:
+            for line in new.decode(errors="replace").splitlines():
+                if line.strip():
+                    yield f"data: {line}\n\n"
+            last_data = time.monotonic()
+        handle = runner.get(run_id)
+        finished = handle is None or handle.terminal
+        if finished and not new and time.monotonic() - last_data > 0.5:
+            status = handle.status if handle else "done"
+            payload = json.dumps({"event": "__done__", "status": status})
+            yield f"data: {payload}\n\n"
+            break
+        await asyncio.sleep(0.25)
 
-    async def gen():
-        offset = 0
-        last_data = time.monotonic()
-        while True:
-            new = b""
-            try:
-                with trace_path.open("rb") as fh:
-                    fh.seek(offset)
-                    new = fh.read()
-                    offset = fh.tell()
-            except OSError:
-                pass
-            if new:
-                for line in new.decode(errors="replace").splitlines():
-                    if line.strip():
-                        yield f"data: {line}\n\n"
-                last_data = time.monotonic()
-            handle = runner.get(run_id)
-            finished = handle is None or handle.terminal
-            if finished and not new and time.monotonic() - last_data > 0.5:
-                status = handle.status if handle else "done"
-                payload = json.dumps({"event": "__done__", "status": status})
-                yield f"data: {payload}\n\n"
-                break
-            await asyncio.sleep(0.25)
 
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+def _approval_gate(run_id: str, answer: str,
+                   role: str) -> tuple[bool, str, float | None]:
+    """May `role` submit this answer for this run? (Phase 6 section 1/2).
+
+    Only approving answers are gated (by the role's approve limit on the
+    live interrupt's amount); a refusal is traced as approval_denied_role
+    and never reaches the run. Shared by the console /answer form (session
+    role) and the API /api/v1/runs/{id}/answer (API key role).
+    """
+    if answer.strip().lower() not in _APPROVING_ANSWERS:
+        return True, "", None
+    handle = runner.get(run_id)
+    payload = (handle.interrupt if handle is not None else None) or {}
+    if not role or payload.get("kind") != "approval":
+        return True, "", None
+    amount = roles.approval_amount(payload.get("tool_args"))
+    can_approve, reason = roles.approve_gate(role, amount)
+    if not can_approve:
+        from ai_operator.tracing import TraceLogger
+        TraceLogger(run_id).event(
+            "approval_denied_role", role=role, reason=reason,
+            tool_name=payload.get("tool_name", ""), amount=amount,
+        )
+    return can_approve, reason, amount
 
 
 @app.post("/runs/{run_id}/answer", include_in_schema=False)
@@ -275,32 +303,21 @@ def answer_run(request: Request, run_id: str, answer: str = Form(...)):
     # Phase 6: the approver's role must hold `approve` on the action and stay
     # within its amount limit. A denied approval is rejected in code - it
     # never reaches the run - and is traced as approval_denied_role.
-    if answer.lower() in _APPROVING_ANSWERS:
-        row = db.get_run(run_id)
-        session = (db.get_session(int(row["session_id"]))
-                   if row and row.get("session_id") else None)
-        role = str((session or {}).get("user_role") or "")
-        handle = runner.get(run_id)
-        payload = (handle.interrupt if handle is not None else None) or {}
-        if role and payload.get("kind") == "approval":
-            amount = roles.approval_amount(payload.get("tool_args"))
-            can_approve, reason = roles.approve_gate(role, amount)
-            if not can_approve:
-                from ai_operator.tracing import TraceLogger
-                TraceLogger(run_id).event(
-                    "approval_denied_role", role=role, reason=reason,
-                    tool_name=payload.get("tool_name", ""),
-                    amount=amount,
-                )
-                return HTMLResponse(
-                    html.page("Approval denied",
-                              f'<h1 class="err">requires a higher role</h1>'
-                              f'<p>{html.esc(role)} cannot approve this payment: '
-                              f"{html.esc(reason)}.</p>"
-                              f'<p><a href="/runs/{html.esc(run_id)}">'
-                              f"Back to run</a></p>", active="runs"),
-                    status_code=403,
-                )
+    row = db.get_run(run_id)
+    session = (db.get_session(int(row["session_id"]))
+               if row and row.get("session_id") else None)
+    role = str((session or {}).get("user_role") or "")
+    can_approve, reason, _ = _approval_gate(run_id, answer, role)
+    if not can_approve:
+        return HTMLResponse(
+            html.page("Approval denied",
+                      f'<h1 class="err">requires a higher role</h1>'
+                      f'<p>{html.esc(role)} cannot approve this payment: '
+                      f"{html.esc(reason)}.</p>"
+                      f'<p><a href="/runs/{html.esc(run_id)}">'
+                      f"Back to run</a></p>", active="runs"),
+            status_code=403,
+        )
     try:
         runner.answer_run(run_id, answer)
     except RuntimeError as exc:
@@ -479,6 +496,7 @@ def _role_resources() -> list[str]:
     except Exception:
         pass
     resources.add("action:approve_payment")
+    resources.add("action:start_run")  # Phase 6: gating API run starts
     return sorted(resources)
 
 
@@ -486,7 +504,7 @@ def _cycles() -> dict[str, list[str]]:
     return {
         "tool:": ["none", "read", "write"],
         "field:": ["none", "read", "write"],
-        "action:": ["none", "approve"],
+        "action:": ["none", "write", "approve"],
     }
 
 
@@ -539,6 +557,219 @@ def roles_permission_toggle(role_id: int, resource: str = Form(...)) -> Response
     _audit_event("role_permission_changed", role=role_name, resource=resource,
                  old=current, new=nxt)
     return RedirectResponse("/roles", status_code=303)
+
+
+# --- Phase 6 section 2: versioned JSON API for external agents --------------
+#
+# Every endpoint below runs under an API key: the key's role is subject to
+# the same role checks as internal actors (section 1). The MCP server calls
+# these endpoints, so the permission path is identical for both interfaces.
+
+def _api_key(request: Request) -> str:
+    auth = str(request.headers.get("authorization") or "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(request.headers.get("x-api-key") or "").strip()
+
+
+def _api_role(request: Request) -> str | None:
+    """Role name for this request's key, or None when missing/invalid/revoked."""
+    return db.api_key_role(_api_key(request))
+
+
+def _api_401() -> JSONResponse:
+    return JSONResponse({"detail": "missing or invalid API key"}, status_code=401)
+
+
+def _token_totals(run_id: str) -> dict:
+    """Live token totals from the trace's model_call events (same source as
+    the report, so API and console always agree)."""
+    total_in = total_out = 0
+    cost = 0.0
+    model = None
+    for ev in _trace_events(run_id):
+        if ev.get("event") != "model_call":
+            continue
+        total_in += int(ev.get("input_tokens") or 0)
+        total_out += int(ev.get("output_tokens") or 0)
+        cost += float(ev.get("estimated_cost_usd") or 0.0)
+        model = ev.get("model") or model
+    return {"input": total_in, "output": total_out,
+            "total": total_in + total_out, "model": model,
+            "estimated_cost_usd": round(cost, 6)}
+
+
+def _trace_variables(run_id: str) -> dict:
+    """Session variables as written during the run (variable_written events)."""
+    out: dict = {}
+    for ev in _trace_events(run_id):
+        if ev.get("event") == "variable_written":
+            out[str(ev.get("name"))] = ev.get("new")
+    return out
+
+
+def _pending_approvals() -> list[dict]:
+    out: list[dict] = []
+    for row in db.list_runs(200):
+        if str(row.get("state") or "") != "waiting_approval":
+            continue
+        rid = str(row["run_id"])
+        request_ev: dict = {}
+        for ev in _trace_events(rid):  # last approval request wins
+            if ev.get("event") == "approval_requested" and ev.get("kind") == "approval":
+                request_ev = ev
+        out.append({
+            "run_id": rid,
+            "task": row.get("task"),
+            "session_id": row.get("session_id"),
+            "tool_name": request_ev.get("tool_name"),
+            "tool_args": request_ev.get("tool_args"),
+            "reason": request_ev.get("reason"),
+            "question": request_ev.get("question"),
+        })
+    return out
+
+
+@app.post("/api/v1/runs")
+def api_start_run(request: Request, payload: dict = Body(...)):
+    """Start a run as the API key's role (POST /api/v1/runs)."""
+    role = _api_role(request)
+    if role is None:
+        return _api_401()
+    if not roles.allows(role, "action:start_run", "write"):
+        return JSONResponse(
+            {"detail": f"role '{role}' cannot start runs "
+                       "(requires write on action:start_run)"},
+            status_code=403)
+    task = str(payload.get("task") or "").strip()
+    session_id = payload.get("session_id")
+    if not task or not isinstance(session_id, int):
+        return JSONResponse(
+            {"detail": "body must include task (string) and session_id (int)"},
+            status_code=400)
+    try:
+        handle = runner.start_run(task, session_id)
+    except RuntimeError as exc:  # another run active / bad session
+        code = 404 if "No session" in str(exc) else 409
+        return JSONResponse({"detail": str(exc)}, status_code=code)
+    row = db.get_run(handle.run_id)
+    return JSONResponse({"run_id": handle.run_id, "state": row.get("state"),
+                         "status": row.get("status"), "task": task,
+                         "session_id": session_id}, status_code=201)
+
+
+@app.get("/api/v1/runs/{run_id}")
+def api_run_detail(run_id: str, request: Request):
+    """State, report, variables and token totals for one run."""
+    if _api_role(request) is None:
+        return _api_401()
+    row = db.get_run(run_id)
+    if row is None:
+        return JSONResponse({"detail": f"no run '{run_id}'"}, status_code=404)
+    return {
+        "run_id": run_id,
+        "state": row.get("state"),
+        "status": row.get("status"),
+        "task": row.get("task"),
+        "session_id": row.get("session_id"),
+        "source": row.get("source"),
+        "created_at": row.get("created_at"),
+        "finished_at": row.get("finished_at"),
+        "report": _report(run_id),
+        "variables": _trace_variables(run_id),
+        "tokens": _token_totals(run_id),
+    }
+
+
+@app.get("/api/v1/runs/{run_id}/events")
+async def api_run_events(run_id: str, request: Request):
+    if _api_role(request) is None:
+        return _api_401()
+    return StreamingResponse(_sse_gen(run_id),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                     "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/v1/runs/{run_id}/answer")
+def api_answer_run(run_id: str, request: Request, payload: dict = Body(...)):
+    """Answer an approval/clarification as the API key's role."""
+    role = _api_role(request)
+    if role is None:
+        return _api_401()
+    answer = str(payload.get("answer") or "").strip()
+    if not answer:
+        return JSONResponse({"detail": "answer must not be empty"},
+                            status_code=400)
+    can_approve, reason, _ = _approval_gate(run_id, answer, role)
+    if not can_approve:
+        return JSONResponse(
+            {"detail": f"requires a higher role: {reason}"}, status_code=403)
+    try:
+        runner.answer_run(run_id, answer)
+    except RuntimeError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+    return {"ok": True, "run_id": run_id}
+
+
+def _approvals_response(request: Request, state: str) -> Response:
+    if _api_role(request) is None:
+        return _api_401()
+    if state not in ("pending", "all"):
+        return JSONResponse({"detail": "state must be 'pending' or 'all'"},
+                            status_code=400)
+    pending = _pending_approvals()
+    return JSONResponse({"approvals": pending if state == "pending" else []})
+
+
+@app.get("/api/v1/approvals")
+def api_approvals(request: Request, state: str = "pending"):
+    return _approvals_response(request, state)
+
+
+@app.get("/approvals", include_in_schema=False)
+def api_approvals_alias(request: Request, state: str = "pending"):
+    """Spec-literal alias of /api/v1/approvals (same auth and payload)."""
+    return _approvals_response(request, state)
+
+
+# --- API keys page (Phase 6 section 2, configuration mode) -----------------
+
+@app.get("/apikeys", response_class=HTMLResponse, include_in_schema=False)
+def apikeys_page(request: Request, message: str = "", error: str = "",
+                  fresh_key: str = "") -> str:
+    return html.apikeys_page(db.list_api_keys(), db.list_roles(),
+                             message=message, error=error, fresh_key=fresh_key,
+                             mode=_mode(request))
+
+
+@app.post("/apikeys", include_in_schema=False)
+def apikeys_create(label: str = Form(...), role_id: int = Form(...)):
+    label = label.strip()
+    if not label:
+        return HTMLResponse(html.apikeys_page(
+            db.list_api_keys(), db.list_roles(), error="A key needs a label."),
+            status_code=400)
+    role = next((r for r in db.list_roles() if r["id"] == role_id), None)
+    if role is None:
+        return HTMLResponse(html.apikeys_page(
+            db.list_api_keys(), db.list_roles(), error="Unknown role."),
+            status_code=400)
+    key_id, plain = db.create_api_key(label, role["id"])
+    _audit_event("api_key_created", label=label, role=role["name"],
+                 key_id=key_id)
+    # The plain key is shown exactly once (only its hash is stored).
+    return HTMLResponse(html.apikeys_page(
+        db.list_api_keys(), db.list_roles(),
+        message=f"Key '{label}' created - copy it now, it is not shown again.",
+        fresh_key=plain))
+
+
+@app.post("/apikeys/{key_id}/revoke", include_in_schema=False)
+def apikeys_revoke(key_id: int):
+    db.revoke_api_key(key_id)
+    _audit_event("api_key_revoked", key_id=key_id)
+    return RedirectResponse("/apikeys", status_code=303)
 
 
 @app.get("/runs/{run_id}/trace", include_in_schema=False)

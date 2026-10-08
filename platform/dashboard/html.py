@@ -16,6 +16,7 @@ NAV = [
     ("schedules", "/schedules", "Schedules", "edit"),
     ("skills", "/skills", "Skills", "edit"),
     ("roles", "/roles", "Roles", "edit"),
+    ("apikeys", "/apikeys", "API keys", "edit"),
     ("sessions", "/sessions", "Sessions", "edit"),
     ("agents", "/agents", "Agents", "edit"),
     ("flow", "/flow", "Flow editor", "edit"),
@@ -1737,6 +1738,69 @@ below the agent's instructions and above its data model block.</p>
     )
 
 
+def apikeys_page(keys: list[dict], roles: list[dict], message: str = "",
+                 error: str = "", fresh_key: str = "",
+                 mode: str = "use") -> str:
+    """Phase 6 section 2: API keys - create (shown once), list, revoke."""
+    rows = ""
+    for k in keys:
+        created = (time.strftime("%Y-%m-%d %H:%M:%S",
+                                 time.localtime(k["created_at"]))
+                   if k.get("created_at") else "-")
+        revoked = bool(k.get("revoked"))
+        status = (f'<span class="badge">revoked</span>' if revoked else
+                  f'<span class="badge complete">active</span>')
+        revoke_btn = (
+            "" if revoked else
+            f'<form method="post" action="/apikeys/{k["id"]}/revoke">'
+            f'<button>Revoke</button></form>')
+        rows += (
+            f'<tr><td class="mono">{esc(k["id"])}</td>'
+            f'<td>{esc(k["label"])}</td>'
+            f'<td class="mono">{esc(k.get("role_name") or "-")}</td>'
+            f'<td class="dim">{esc(created)}</td><td>{status}</td>'
+            f"<td>{revoke_btn}</td></tr>")
+    if not rows:
+        rows = '<tr><td colspan="6" class="dim">No API keys yet.</td></tr>'
+    role_opts = "".join(
+        f'<option value="{r["id"]}">{esc(r["name"])}</option>'
+        for r in roles)
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    fresh = ""
+    if fresh_key:
+        fresh = (
+            f'<div class="panel" style="border-color:var(--warn)">'
+            f'<p><strong>Copy this key now - it is shown only once:</strong></p>'
+            f'<pre class="mono" style="white-space:pre-wrap">'
+            f'{esc(fresh_key)}</pre>'
+            f'<p class="dim">Send it as <code>Authorization: Bearer '
+            f'&lt;key&gt;</code> or <code>X-API-Key: &lt;key&gt;</code>.</p>'
+            f'</div>')
+    return page(
+        "API keys",
+        f"""
+<h1>API keys</h1>
+{msg}{err}{fresh}
+<p class="dim">Keys authenticate the versioned HTTP API
+(<code>/api/v1/...</code>) and the MCP server. Each key runs as its role and
+is subject to the same role checks as internal actors; only a SHA-256 hash is
+stored.</p>
+<table>
+<tr><th>ID</th><th>Label</th><th>Role</th><th>Created</th><th>Status</th><th></th></tr>
+{rows}
+</table>
+<h2>New key</h2>
+<form method="post" action="/apikeys" class="row">
+  <input name="label" placeholder="label (e.g. n8n bridge)" required
+         style="flex:2">
+  <select name="role_id">{role_opts}</select>
+  <button class="primary">Create key</button>
+</form>""",
+        active="apikeys", mode=mode,
+    )
+
+
 def roles_page(roles: list[dict], permissions: list[dict], resources: list[str],
                cycles: dict[str, list[str]], message: str = "",
                error: str = "", mode: str = "use") -> str:
@@ -1829,6 +1893,8 @@ access, or leave it read-only by assignment.</p>""",
 
 
 _AUDIT_LABELS = {
+    "api_key_created": "l-write",
+    "api_key_revoked": "l-err",
     "variable_written": "l-write",
     "permission_denied": "l-err",
     "permission_denied_role": "l-err",
@@ -1898,6 +1964,10 @@ def _audit_summary(ev: dict, decision: str | None = None) -> str:
         return f"role {ev.get('role')} created"
     if kind == "role_deleted":
         return f"role {ev.get('role')} deleted"
+    if kind == "api_key_created":
+        return f"api key '{ev.get('label')}' created for role {ev.get('role')}"
+    if kind == "api_key_revoked":
+        return f"api key #{ev.get('key_id')} revoked"
     if kind == "tool_disabled":
         why = ("not enabled for this agent" if ev.get("scope") == "agent"
                else f"not enabled for session {ev.get('tenant')}")

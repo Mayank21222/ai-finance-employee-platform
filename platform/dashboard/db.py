@@ -59,6 +59,13 @@ SEED_ROLE_PERMISSIONS: list[tuple[str, str, str, float | None]] = [
     ("auditor", "tool:*", "read", None),
     ("auditor", "field:*", "read", None),
     ("auditor", "action:approve_payment", "none", None),
+    # Phase 6 section 2: starting a run is a named action. A read-only role
+    # (auditor, viewer) may hold API keys but cannot start runs.
+    ("finance_manager", "action:start_run", "write", None),
+    ("ap_clerk", "action:start_run", "write", None),
+    ("auditor", "action:start_run", "none", None),
+    ("finance_operator", "action:start_run", "write", None),
+    ("viewer", "action:start_run", "none", None),
     ("finance_operator", "tool:*", "write", None),
     ("finance_operator", "field:*", "write", None),
     ("finance_operator", "action:approve_payment", "approve", 1000000.0),
@@ -146,6 +153,14 @@ def init_db() -> None:
                 access TEXT NOT NULL DEFAULT 'none',
                 approve_limit_amount REAL,
                 UNIQUE(role_id, resource)
+            );
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                role_id INTEGER NOT NULL REFERENCES roles(id),
+                created_at REAL NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0
             );
             """
         )
@@ -635,3 +650,58 @@ def set_role_permission(role_id: int, resource: str, access: str,
                 "INSERT INTO role_permissions (role_id, resource, access, "
                 "approve_limit_amount) VALUES (?, ?, ?, ?)",
                 (role_id, resource, access, limit))
+
+
+# --- Phase 6 section 2: API keys for the open HTTP interface ----------------
+
+def _hash_key(plain: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(plain.encode("utf-8")).hexdigest()
+
+
+def create_api_key(label: str, role_id: int) -> tuple[int, str]:
+    """Mint a key; only its SHA-256 hash is stored. Returns (id, plain key).
+
+    The plain key is shown to the caller exactly once (API keys page).
+    """
+    import secrets
+
+    plain = "fin_" + secrets.token_urlsafe(24)
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO api_keys (label, key_hash, role_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (label.strip(), _hash_key(plain), int(role_id), time.time()),
+        )
+        return int(cur.lastrowid), plain
+
+
+def list_api_keys() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute(
+            "SELECT k.id, k.label, k.created_at, k.revoked, "
+            "k.role_id, r.name AS role_name FROM api_keys k "
+            "JOIN roles r ON r.id = k.role_id ORDER BY k.id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_key(key_id: int) -> None:
+    with connect() as con:
+        con.execute("UPDATE api_keys SET revoked = 1 WHERE id = ?", (int(key_id),))
+
+
+def api_key_role(plain: str) -> str | None:
+    """Role name for a valid (present, unrevoked) key; None otherwise."""
+    if not plain:
+        return None
+    with connect() as con:
+        row = con.execute(
+            "SELECT k.revoked, r.name AS role_name FROM api_keys k "
+            "JOIN roles r ON r.id = k.role_id WHERE k.key_hash = ?",
+            (_hash_key(plain),),
+        ).fetchone()
+    if row is None or row["revoked"]:
+        return None
+    return str(row["role_name"])
