@@ -11,14 +11,16 @@
   "connectors": [
     {
       "name": "get_invoice_list",
-      "description": "Fetch the current invoice list from the accounting API (mock app, read-only).",
+      "description": "Get invoice list - fetch the current invoice list from the accounting API (mock app, read-only).",
       "method": "GET",
       "url": "{{app.base_url}}/api/invoices?tenant={{session.tenant}}",
       "headers": {
         "Accept": "application/json"
       },
       "body": "",
-      "level": "read"
+      "level": "read",
+      "timeout": 15.0,
+      "managed_by": "dashboard"
     }
   ],
   "nodes": [
@@ -29,7 +31,9 @@
       "instructions": "Available specialists:\n- ap_agent: invoice entry - enters a vendor invoice into the payables system and hands off to verification.\n- reminder_agent: payment reminder - reads invoices and lists the overdue ones (read-only).\nTask types: invoice_entry, payment_reminder, expense_review, unknown.\nSpecialists: invoice_entry -> ap_agent, payment_reminder -> reminder_agent, expense_review -> ap_agent, unknown -> ap_agent.\nClassify the [TASK] and finish with exactly one task type in expected_outcome.",
       "documents": [],
       "tools_enabled": [],
-      "next_node_ids": ["ap_agent"],
+      "next_node_ids": [
+        "ap_agent"
+      ],
       "fallback_next": "report",
       "save_as": "task_type",
       "routes": {
@@ -61,7 +65,9 @@
         "submit_form",
         "write_memory"
       ],
-      "next_node_ids": ["check_invoice"],
+      "next_node_ids": [
+        "check_invoice"
+      ],
       "fallback_next": "report",
       "save_as": "ap_answer",
       "data_model": "Invoice"
@@ -84,7 +90,9 @@
         "screenshot",
         "search_files"
       ],
-      "next_node_ids": ["reminder_message"],
+      "next_node_ids": [
+        "reminder_message"
+      ],
       "fallback_next": "report",
       "save_as": "overdue_list"
     },
@@ -92,7 +100,9 @@
       "type": "message",
       "node_id": "reminder_message",
       "template": "Payment reminder list (overdue invoices):\n{{vars.overdue_list}}",
-      "next_node_ids": ["report"],
+      "next_node_ids": [
+        "report"
+      ],
       "fallback_next": "report"
     },
     {
