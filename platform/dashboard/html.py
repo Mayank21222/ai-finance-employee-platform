@@ -105,6 +105,20 @@ _CSS = """
   .flow-layout #node-panel { flex:0 0 360px; min-height:140px; }
   .fnode { cursor:pointer; }
   .fnode:hover .nshape { stroke:#fff; }
+  /* Phase 4: audit trail - expandable rows, per-event-type labels. */
+  .audit-row { border-bottom:1px dashed #1a222c; padding:2px 0; }
+  .audit-row summary { cursor:pointer; padding:5px 0; font-size:13.5px; }
+  .audit-row summary a { color:var(--acc); text-decoration:none; }
+  .audit-row pre { background:#0a0e13; border:1px solid var(--line);
+                   border-radius:6px; padding:8px; overflow-x:auto;
+                   font-size:12px; }
+  .lbl { display:inline-block; min-width:155px; font-size:12px;
+         font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .lbl.l-write { color:var(--ok); }
+  .lbl.l-err { color:var(--err); }
+  .lbl.l-warn { color:var(--warn); }
+  .lbl.l-info { color:var(--acc); }
+  .lbl.l-dim { color:var(--dim); }
 """
 
 
@@ -1294,4 +1308,139 @@ Agents page and is available to agents from the next run.</p>
   <button class="primary">Create connector</button>
 </form>""",
         active="connectors", mode=mode,
+    )
+
+
+_AUDIT_LABELS = {
+    "variable_written": "l-write",
+    "permission_denied": "l-err",
+    "tool_disabled": "l-err",
+    "unknown_tool": "l-err",
+    "visit_limit_hit": "l-err",
+    "run_error": "l-err",
+    "understand_failed": "l-err",
+    "budget_exhausted": "l-err",
+    "approval_requested": "l-warn",
+    "human_input": "l-warn",
+    "clarification": "l-warn",
+    "verification": "l-info",
+    "report_written": "l-info",
+    "finish": "l-info",
+}
+
+
+def _approval_decisions(events: list[dict]) -> dict[int, str]:
+    """Index of each approval_requested -> the answer that resolved it.
+
+    The decision is a separate human_input event that follows the request in
+    the same run; walk each run chronologically and attach the first approval
+    answer to the most recent still-pending request.
+    """
+    by_run: dict[str, list[tuple[int, dict]]] = {}
+    for i, ev in enumerate(events):  # events arrive reverse-chronological
+        by_run.setdefault(str(ev.get("run_id")), []).append((i, ev))
+    decisions: dict[int, str] = {}
+    for items in by_run.values():
+        pending: int | None = None
+        for i, ev in reversed(items):
+            kind = ev.get("event")
+            if kind == "approval_requested":
+                pending = i
+            elif (kind == "human_input" and ev.get("kind") == "approval"
+                    and pending is not None):
+                decisions[pending] = str(ev.get("answer") or "decided")
+                pending = None
+    return decisions
+
+
+def _audit_summary(ev: dict, decision: str | None = None) -> str:
+    """The short human-readable summary for one trace event."""
+    kind = ev.get("event")
+    if kind == "variable_written":
+        return (f"{ev.get('name')}: "
+                f"{json.dumps(ev.get('old'), default=str)} → "
+                f"{json.dumps(ev.get('new'), default=str)}")
+    if kind == "permission_denied":
+        return f"{ev.get('node')} denied writing '{ev.get('name')}'"
+    if kind == "tool_disabled":
+        why = ("not enabled for this agent" if ev.get("scope") == "agent"
+               else f"not enabled for session {ev.get('tenant')}")
+        return f"{ev.get('tool_name')} blocked: {why}"
+    if kind == "visit_limit_hit":
+        return (f"node {ev.get('node')} hit visit limit {ev.get('limit')} "
+                f"(total {ev.get('total')})")
+    if kind == "approval_requested":
+        base = (f"{ev.get('tool_name')} needs approval: {ev.get('reason')}")
+        return f"{base} → {decision}" if decision else base
+    if kind in ("verification", "verification_result"):
+        verdict = "matched" if ev.get("matched") else "MISMATCH"
+        detail = ev.get("details") or ""
+        if not ev.get("matched"):
+            detail += (f" expected={json.dumps(ev.get('expected'), default=str)}"
+                       f" found={json.dumps(ev.get('found'), default=str)}")
+        return f"{verdict}: {detail}"
+    if kind == "human_input":
+        return (f"{ev.get('kind') or 'input'}: "
+                f"{ev.get('answer') or ev.get('resolved') or ''}")
+    if kind == "decision":
+        return f"{ev.get('action_type')}: {str(ev.get('thought') or '')[:90]}"
+    if kind == "tool_result":
+        return f"{ev.get('tool')} {'ok' if ev.get('ok') else 'FAILED'}"
+    if kind == "message_rendered":
+        return str(ev.get("rendered") or "")[:120]
+    if kind in ("node_entered", "node_exited"):
+        return f"{ev.get('node')} ({ev.get('node_type') or kind})"
+    if kind == "report_written":
+        return f"report status: {ev.get('status')}"
+    if kind == "run_started":
+        return str(ev.get("task") or "")[:120]
+    if kind == "evidence_captured":
+        return str(ev.get("path") or "")
+    return ""
+
+
+def audit_page(events: list[dict], run_id: str = "", node: str = "",
+               event: str = "", mode: str = "use") -> str:
+    """Phase 4: the audit trail - every trace event, newest first.
+
+    Reads only trace.jsonl (no new data). Each row expands to the full
+    event; run/node/event filters travel in the query string so a link can
+    point at a specific filtered view.
+    """
+    decisions = _approval_decisions(events)
+    rows = []
+    for i, ev in enumerate(events):
+        kind = str(ev.get("event") or "?")
+        cls = _AUDIT_LABELS.get(kind, "l-dim")
+        rid = str(ev.get("run_id") or "")
+        summary = _audit_summary(ev, decisions.get(i))
+        full = esc(json.dumps(ev, indent=2, default=str))
+        rows.append(f"""
+<details class="audit-row"><summary>
+<span class="dim">{esc(ev.get("time") or "")}</span>
+<a href="/runs/{esc(rid)}" class="mono">{esc(rid)}</a>
+<span class="dim mono">{esc(ev.get("node") or "")}</span>
+<b class="lbl {cls}">{esc(kind)}</b> <span>{summary}</span>
+</summary><pre class="mono">{full}</pre></details>""")
+    if not rows:
+        rows.append('<p class="dim">No trace events match these filters.</p>')
+    msg = ""
+    return page(
+        "Audit trail",
+        f"""
+<h1>Audit trail</h1>
+{msg}
+<p class="dim">Every event from every run's trace.jsonl, newest first.
+Click a row to expand the full event.</p>
+<form method="get" action="/audit" class="row">
+  <input name="run_id" placeholder="filter by run id" value="{esc(run_id)}"
+         style="flex:2">
+  <input name="node" placeholder="filter by node" value="{esc(node)}">
+  <input name="event" placeholder="filter by event type" value="{esc(event)}">
+  <button>Apply filters</button>
+  <a href="/audit"><button type="button">Clear</button></a>
+</form>
+<p class="dim">{len(events)} event(s)</p>
+{''.join(rows)}""",
+        active="audit", mode=mode,
     )

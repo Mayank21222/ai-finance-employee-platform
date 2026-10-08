@@ -670,6 +670,49 @@ def connectors_delete_endpoint(connector_id: int, endpoint_name: str):
     return RedirectResponse("/connectors", status_code=303)
 
 
+# --- audit trail (Phase 4) --------------------------------------------------
+
+
+@app.get("/audit", response_class=HTMLResponse, include_in_schema=False)
+def audit_page(request: Request, run_id: str = "", node: str = "",
+               event: str = "") -> str:
+    events = _audit_events(run_id=run_id, node=node, event=event)
+    return html.audit_page(events, run_id=run_id, node=node, event=event,
+                           mode=_mode(request))
+
+
+def _audit_events(run_id: str = "", node: str = "", event: str = "",
+                  limit: int = 500) -> list[dict]:
+    """Read trace.jsonl from every run; no new data is stored for audit."""
+    collected: list[dict] = []
+    if not RUNS_ROOT.exists():
+        return []
+    for path in RUNS_ROOT.glob("*/trace.jsonl"):
+        rid = path.parent.name
+        if run_id and rid != run_id:
+            continue
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if event and ev.get("event") != event:
+                continue
+            if node and ev.get("node") != node:
+                continue
+            ev.setdefault("run_id", rid)
+            collected.append(ev)
+    collected.sort(key=lambda e: float(e.get("ts") or 0), reverse=True)
+    return collected[:limit]
+
+
 # --- flow editor -----------------------------------------------------------
 
 

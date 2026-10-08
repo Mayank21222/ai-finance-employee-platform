@@ -395,3 +395,71 @@ def test_connector_registry_page_loads_into_tool_registry():
         if DEFAULT_FLOW_PATH.read_text() != original:
             DEFAULT_FLOW_PATH.write_text(original)
         flowcfg.sync_registry()  # registry back to the pristine config state
+
+
+def test_audit_trail_page_renders_synthetic_trace():
+    """Mandated Phase 4 test: the audit trail page - reads only trace.jsonl,
+    renders every event newest-first with typed summaries, expands rows, and
+    filters by run id, node, or event type via query parameters."""
+    from ai_operator.tracing import RUNS_ROOT
+
+    run_id = "p4_audit_" + uuid.uuid4().hex[:12]
+    run_dir = RUNS_ROOT / run_id
+    base = 1_700_000_000.0
+
+    def ev(i, etype, **kw):
+        d = {"ts": base + i, "time": f"T{i}", "event": etype}
+        d.update(kw)
+        return json.dumps(d)
+
+    events = [
+        ev(0, "run_started", task="Pay the invoices"),
+        ev(1, "node_entered", node="classifier", node_type="agent"),
+        ev(2, "variable_written", node="decide", name="task_type",
+           old="", new="ap_agent"),
+        ev(3, "approval_requested", node="execute", tool_name="post_journal",
+           reason="amount > 50000"),
+        ev(4, "human_input", kind="approval", answer="approved"),
+        ev(5, "tool_disabled", node="execute", tool_name="delete_rows",
+           scope="agent"),
+        ev(6, "visit_limit_hit", node="verify", limit=3, total=4),
+        ev(7, "verification", node="verify", matched=False,
+           details="row count differs", expected="5 rows",
+           found="4 rows"),
+    ]
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "trace.jsonl").write_text("\n".join(events) + "\n")
+
+        body = client.get("/audit", params={"run_id": run_id}).text
+        assert run_id in body and f"/runs/{run_id}" in body
+        # Typed labels with their summaries (Improvements.md lines 211-219).
+        assert "variable_written" in body and "ap_agent" in body
+        assert "tool_disabled" in body and "delete_rows" in body
+        assert "not enabled for this agent" in body
+        assert "visit_limit_hit" in body and "visit limit 3" in body
+        assert "approval_requested" in body and "post_journal" in body
+        assert "approved" in body  # decision attached to the request
+        assert "verification" in body and "MISMATCH" in body
+        assert "row count differs" in body
+        # Rows expand to the full event without JavaScript (details/summary).
+        assert "<details" in body and "<pre" in body
+        assert "amount > 50000" in body  # full approval event embedded
+        # Reverse chronological: newest verification before oldest run_started.
+        assert body.index("verification") < body.index("run_started")
+
+        # Filter by node narrows the view.
+        body = client.get(
+            "/audit", params={"run_id": run_id, "node": "verify"}).text
+        assert "visit_limit_hit" in body and "variable_written" not in body
+        # Filter by event type narrows the view.
+        body = client.get(
+            "/audit", params={"run_id": run_id, "event": "variable_written"}
+        ).text
+        assert "variable_written" in body and "tool_disabled" not in body
+        # No matches -> explicit empty state, not a crash.
+        body = client.get(
+            "/audit", params={"run_id": run_id, "event": "nope_xyz"}).text
+        assert "No trace events match these filters" in body
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
