@@ -175,6 +175,37 @@ def init_db() -> None:
                 secret TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                config TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                link TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS approval_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                nonce TEXT NOT NULL UNIQUE,
+                expires_at REAL NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         # Phase-3 state machine column (queued|running|waiting_approval|
@@ -782,3 +813,126 @@ def clear_trigger_file(trigger_id: int) -> None:
     with connect() as con:
         con.execute("UPDATE triggers SET last_file_path = NULL WHERE id = ?",
                     (int(trigger_id),))
+
+
+# --- Phase 6 section 6: approval and alert channels --------------------------
+
+def _channel_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["config"] = json.loads(data.get("config") or "{}")
+    except ValueError:
+        data["config"] = {}
+    return data
+
+
+def list_channels() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM channels ORDER BY id").fetchall()
+    return [_channel_row(r) for r in rows]
+
+
+def get_channel(channel_id: int) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM channels WHERE id = ?",
+                          (int(channel_id),)).fetchone()
+    return _channel_row(row) if row else None
+
+
+def add_channel(name: str, type: str, config: dict[str, Any],
+                enabled: bool = True) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO channels (name, type, config, enabled, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, type, json.dumps(config), int(bool(enabled)), time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def set_channel_enabled(channel_id: int, enabled: bool) -> None:
+    with connect() as con:
+        con.execute("UPDATE channels SET enabled = ? WHERE id = ?",
+                    (int(bool(enabled)), int(channel_id)))
+
+
+def delete_channel(channel_id: int) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM channels WHERE id = ?", (int(channel_id),))
+
+
+def record_notification(channel_id: int, run_id: str, kind: str,
+                        summary: str, link: str = "") -> int:
+    """Queue one notification row (before delivery is attempted)."""
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO notifications (channel_id, run_id, kind, summary, "
+            "link, status, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?)",
+            (int(channel_id), run_id, kind, summary, link, time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def finish_notification(notification_id: int, status: str,
+                        error: str = "") -> None:
+    with connect() as con:
+        con.execute("UPDATE notifications SET status = ?, error = ? "
+                    "WHERE id = ?",
+                    (status, error, int(notification_id)))
+
+
+def list_notifications(run_id: str | None = None,
+                       limit: int = 200) -> list[dict[str, Any]]:
+    with connect() as con:
+        if run_id:
+            rows = con.execute(
+                "SELECT n.*, c.name AS channel_name, c.type AS channel_type "
+                "FROM notifications n LEFT JOIN channels c ON c.id = "
+                "n.channel_id WHERE n.run_id = ? ORDER BY n.id DESC "
+                "LIMIT ?", (run_id, limit)).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT n.*, c.name AS channel_name, c.type AS channel_type "
+                "FROM notifications n LEFT JOIN channels c ON c.id = "
+                "n.channel_id ORDER BY n.id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_approval_link(run_id: str, nonce: str,
+                         expires_at: float) -> int:
+    with connect() as con:
+        cur = con.execute(
+            "INSERT INTO approval_links (run_id, nonce, expires_at, "
+            "created_at) VALUES (?, ?, ?, ?)",
+            (run_id, nonce, float(expires_at), time.time()),
+        )
+        return int(cur.lastrowid)
+
+
+def approval_link(nonce: str) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM approval_links WHERE nonce = ?",
+                          (nonce,)).fetchone()
+    return dict(row) if row else None
+
+
+def consume_approval_link(nonce: str) -> bool:
+    """Mark a link used; False if it was already used (one-time)."""
+    with connect() as con:
+        cur = con.execute(
+            "UPDATE approval_links SET used = 1 WHERE nonce = ? "
+            "AND used = 0", (nonce,))
+        return cur.rowcount == 1
+
+
+def get_setting(key: str) -> str | None:
+    with connect() as con:
+        row = con.execute("SELECT value FROM settings WHERE key = ?",
+                          (key,)).fetchone()
+    return str(row["value"]) if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with connect() as con:
+        con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    (key, value))

@@ -24,7 +24,8 @@ from ai_operator.llm import get_client
 from ai_operator.permissions import PermissionLevel
 from ai_operator.tools import connectors as connector_tools
 from ai_operator.tracing import RUNS_ROOT
-from platform.dashboard import db, flowcfg, html, runner, scheduler
+from platform.dashboard import (channels, db, flowcfg, html, runner,
+                                scheduler)
 from platform.flow import compiler
 from platform.flow.models import Flow, load_flow
 from platform.flow.validator import SUPPORTED_HTTP_METHODS, validate
@@ -481,6 +482,101 @@ def api_fire_trigger(trigger_id: int, request: Request,
         trigger_id, payload or {},
         str(request.headers.get("x-trigger-secret") or ""))
     return JSONResponse(body, status_code=status)
+
+
+# --- approval and alert channels (Phase 6 section 6) ------------------------
+
+CHANNEL_TYPES = ("webhook", "email_smtp")
+
+
+@app.get("/channels", response_class=HTMLResponse, include_in_schema=False)
+def channels_page(request: Request, message: str = "", error: str = "") -> str:
+    return html.channels_page(db.list_channels(), db.list_notifications(),
+                              message=message, error=error,
+                              mode=_mode(request))
+
+
+@app.post("/channels", include_in_schema=False)
+def channels_add(name: str = Form(...), type: str = Form(...),
+                 config: str = Form("{}"),
+                 enabled: str | None = Form(None)):
+    def back(msg: str = "", err: str = "") -> HTMLResponse:
+        return HTMLResponse(html.channels_page(
+            db.list_channels(), db.list_notifications(),
+            message=msg, error=err, mode="configure"))
+
+    if type not in CHANNEL_TYPES:
+        return back(err=f"Unknown channel type {type!r}; use "
+                        f"{' or '.join(CHANNEL_TYPES)}.")
+    try:
+        cfg = json.loads(config or "{}")
+    except ValueError:
+        return back(err="Channel config must be a JSON object.")
+    if not isinstance(cfg, dict):
+        return back(err="Channel config must be a JSON object.")
+    if type == "webhook" and not str(cfg.get("url") or "").strip():
+        return back(err='A webhook channel needs a "url" in its config.')
+    if type == "email_smtp" and not str(cfg.get("host") or "").strip():
+        return back(err='An email channel needs a "host" in its config.')
+    channel_id = db.add_channel(name.strip() or type, type, cfg,
+                                enabled=enabled is not None)
+    return RedirectResponse(f"/channels?message=Channel+{channel_id}+added",
+                            status_code=303)
+
+
+@app.post("/channels/{channel_id}/toggle", include_in_schema=False)
+def channels_toggle(channel_id: int):
+    channel = db.get_channel(channel_id)
+    if channel is not None:
+        db.set_channel_enabled(channel_id, not channel.get("enabled"))
+    return RedirectResponse("/channels", status_code=303)
+
+
+@app.post("/channels/{channel_id}/delete", include_in_schema=False)
+def channels_delete(channel_id: int):
+    db.delete_channel(channel_id)
+    return RedirectResponse("/channels", status_code=303)
+
+
+@app.post("/channels/{channel_id}/test", include_in_schema=False)
+def channels_test(channel_id: int):
+    """Send a test message through this channel (delivery may fail; the
+    result is shown either way)."""
+    status, error = channels.send_test(channel_id)
+    if status == "sent":
+        return RedirectResponse(
+            "/channels?message=Test+notification+sent", status_code=303)
+    from urllib.parse import quote
+
+    return RedirectResponse(f"/channels?error={quote('Test failed: ' + error)}",
+                            status_code=303)
+
+
+@app.get("/approve/{token}", include_in_schema=False)
+def approval_link_open(token: str):
+    """Open a signed one-time approval link.
+
+    First open redirects to the run (where the approval card lives); a
+    reused or expired link is rejected with 410. The link never bypasses
+    the role check on POST /runs/{id}/answer (section 1).
+    """
+    status, run_id = channels.consume_link(token)
+    if status == "ok" and run_id:
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+    messages = {
+        "expired": "This approval link has expired.",
+        "reused": "This approval link was already used.",
+        "invalid": "This approval link is not valid.",
+    }
+    return HTMLResponse(
+        html.page("Approval link",
+                  '<h1 class="err">link rejected</h1>'
+                  f'<p>{messages.get(status, messages["invalid"])}</p>'
+                  '<p class="dim">Approval links are single-use. Ask for a '
+                  'new notification if you still need to decide.</p>',
+                  active="runs"),
+        status_code=410 if status in ("expired", "reused") else 404,
+    )
 
 
 # --- skills (Phase 5) -------------------------------------------------------

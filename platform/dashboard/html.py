@@ -15,6 +15,7 @@ NAV = [
     ("connectors", "/connectors", "Connectors", "edit"),
     ("schedules", "/schedules", "Schedules", "edit"),
     ("triggers", "/triggers", "Triggers", "edit"),
+    ("channels", "/channels", "Channels", "edit"),
     ("skills", "/skills", "Skills", "edit"),
     ("roles", "/roles", "Roles", "edit"),
     ("apikeys", "/apikeys", "API keys", "edit"),
@@ -1771,6 +1772,103 @@ when the run fails). <strong>webhook</strong>: POST
   <button class="primary">Add trigger</button>
 </form>""",
         active="triggers", mode=mode,
+    )
+
+
+def channels_page(channels: list[dict], notifications: list[dict],
+                  error: str = "", message: str = "",
+                  mode: str = "use") -> str:
+    """Phase 6 section 6: approval and alert channels + delivery log."""
+    rows = ""
+    for c in channels:
+        cfg = c.get("config") or {}
+        if c["type"] == "webhook":
+            detail = esc(cfg.get("url") or "(no url)")
+        else:
+            detail = (f'{esc(cfg.get("host") or "(no host)")}:{esc(cfg.get("port") or 587)}'
+                      f' &rarr; {esc(cfg.get("to") or "(no to)")}')
+        enabled = bool(c.get("enabled"))
+        rows += (
+            f'<tr><td class="mono">{c["id"]}</td><td>{esc(c["name"])}</td>'
+            f'<td><span class="badge">{esc(c["type"])}</span></td>'
+            f'<td class="mono">{detail}</td>'
+            f'<td><span class="badge '
+            f'{"completed" if enabled else "interrupted"}">'
+            f'{"enabled" if enabled else "disabled"}</span></td>'
+            f'<td class="row">'
+            f'<form method="post" action="/channels/{c["id"]}/test">'
+            f'<button>Send test</button></form>'
+            f'<form method="post" action="/channels/{c["id"]}/toggle">'
+            f'<button>{"Disable" if enabled else "Enable"}</button></form>'
+            f'<form method="post" action="/channels/{c["id"]}/delete" '
+            f'onsubmit="return confirm(\'Delete channel {c["id"]}?\')">'
+            f'<button>Delete</button></form></td></tr>')
+    if not rows:
+        rows = ('<tr><td colspan="5" class="dim">No channels yet. '
+                'Add a webhook or SMTP channel below.</td></tr>')
+    notif_rows = ""
+    for n in notifications[:20]:
+        when = (time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(n["created_at"]))
+                if n.get("created_at") else "-")
+        status = str(n.get("status") or "-")
+        link_cell = (f'<a class="mono" href="{esc(n["link"])}">open</a>'
+                     if n.get("link") and str(n["link"]).startswith("http")
+                     else '<span class="dim">-</span>')
+        notif_rows += (
+            f'<tr><td class="dim">{esc(when)}</td>'
+            f'<td>{esc(n.get("channel_name") or "-")} '
+            f'<span class="badge">{esc(n.get("channel_type") or "")}</span></td>'
+            f'<td><span class="badge">{esc(n["kind"])}</span></td>'
+            f'<td class="mono"><a href="/runs/{esc(n["run_id"])}">'
+            f'{esc(str(n["run_id"])[:24])}</a></td>'
+            f'<td class="mono" title="{esc(n.get("error") or "")}">'
+            f'{esc(str(n.get("summary") or "")[:70])}</td>'
+            f'<td><span class="badge '
+            f'{"completed" if status == "sent" else "interrupted"}">'
+            f'{esc(status)}</span></td><td>{link_cell}</td></tr>')
+    if not notif_rows:
+        notif_rows = ('<tr><td colspan="7" class="dim">No notifications '
+                      'sent yet.</td></tr>')
+    msg = f'<p class="ok">{esc(message)}</p>' if message else ""
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return page(
+        "Channels",
+        f"""
+<h1>Approval &amp; alert channels</h1>
+{msg}{err}
+<p class="dim">When a run enters <strong>waiting_approval</strong> each
+enabled channel gets the action, the policy rule and a signed one-time link
+to the approval card (single use; expired links are rejected). Runs ending
+<strong>failed</strong> or <strong>interrupted</strong> also alert. The link
+opens the card only &mdash; approving still enforces the approver's role
+limit.</p>
+<table>
+<tr><th>ID</th><th>Name</th><th>Type</th><th>Destination</th>
+<th>Status</th><th></th></tr>
+{rows}
+</table>
+<h2>New channel</h2>
+<form method="post" action="/channels" class="row">
+  <input name="name" placeholder="name" style="flex:1" required>
+  <select name="type">
+    <option value="webhook">webhook (Slack/Teams)</option>
+    <option value="email_smtp">email_smtp</option>
+  </select>
+  <input name="config" style="flex:3" required
+         placeholder='config JSON: {{"url": "https://hooks..."}} or '
+                    '{{"host": "smtp...", "to": "..."}}'>
+  <label class="dim"><input type="checkbox" name="enabled" checked>
+  enabled</label>
+  <button class="primary">Add channel</button>
+</form>
+<h2>Recent notifications</h2>
+<table>
+<tr><th>When</th><th>Channel</th><th>Kind</th><th>Run</th><th>Summary</th>
+<th>Status</th><th>Link</th></tr>
+{notif_rows}
+</table>""",
+        active="channels", mode=mode,
     )
 
 

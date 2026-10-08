@@ -35,7 +35,7 @@ from ai_operator.llm import get_client
 from ai_operator.run import CHECKPOINT_DB, _ensure_app, _set_failures
 from ai_operator.state import INITIAL_STATE_KEYS
 from ai_operator.tracing import TraceLogger, unregister
-from platform.dashboard import db
+from platform.dashboard import channels, db
 from platform.flow.compiler import compile_flow
 from platform.flow.models import Flow, load_flow
 
@@ -192,6 +192,8 @@ def reconcile() -> list[str]:
             db.finish_run(run_id, "interrupted",
                           "dashboard restarted while run was active",
                           state="interrupted")
+            # Phase 6 section 6: a crash is an interruption worth alerting.
+            channels.on_state(run_id, "interrupted")
             flipped.append(run_id)
     return flipped
 
@@ -263,6 +265,10 @@ def _stream_loop(handle: RunHandle, graph, config: dict[str, Any],
         handle.interrupt = interrupt_payload
         handle.status = "waiting_input"
         db.set_state(handle.run_id, "waiting_approval")
+        # Phase 6 section 6: notify approval channels (signed one-time link).
+        # Never raises; failure leaves a 'failed' notification row behind.
+        channels.on_state(handle.run_id, "waiting_approval",
+                          interrupt=interrupt_payload)
         answer = handle.answers.get()
         if answer is None:
             raise RunCancelled
@@ -289,6 +295,10 @@ def _finish(handle: RunHandle, logger: TraceLogger,
     state = _state_for_report(str(report.get("status", "done")))
     db.finish_run(handle.run_id, str(report.get("status", "done")),
                   state=state)
+    # Phase 6 section 6: alert channels on a bad ending. Cancelled runs end
+    # through the RunCancelled branch below and deliberately do not alert.
+    if state in ("failed", "interrupted"):
+        channels.on_state(handle.run_id, state)
 
 
 def _prepare(handle: RunHandle, session: dict[str, Any], failures: str,
@@ -353,6 +363,7 @@ def _worker(handle: RunHandle, session: dict[str, Any], failures: str,
         logger.event("run_error", error=handle.error,
                      trace=traceback.format_exc()[-4000:])
         db.finish_run(handle.run_id, "failed", handle.error, state="failed")
+        channels.on_state(handle.run_id, "failed")  # Phase 6 section 6
     finally:
         if saver_cm is not None:
             try:
@@ -361,7 +372,6 @@ def _worker(handle: RunHandle, session: dict[str, Any], failures: str,
                 pass
         handle.finished_at = time.time()
         unregister(handle.run_id)
-
 
 def _resume_worker(handle: RunHandle, session: dict[str, Any],
                    answer: str) -> None:
@@ -389,6 +399,7 @@ def _resume_worker(handle: RunHandle, session: dict[str, Any],
         logger.event("run_error", error=handle.error,
                      trace=traceback.format_exc()[-4000:])
         db.finish_run(handle.run_id, "failed", handle.error, state="failed")
+        channels.on_state(handle.run_id, "failed")  # Phase 6 section 6
     finally:
         if saver_cm is not None:
             try:
