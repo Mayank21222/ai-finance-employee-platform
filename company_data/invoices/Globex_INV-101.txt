@@ -1,0 +1,6 @@
+Vendor: Globex
+Invoice: GLB-101
+Amount: Rs. 95,000
+Currency: INR
+Due date: 2026-08-01
+Status: pending

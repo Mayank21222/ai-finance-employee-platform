@@ -1,0 +1,8 @@
+Vendor: Acme Corp
+Invoice: INV-001
+Amount: Rs. 22,400
+Currency: INR
+Due date: 2026-05-10
+Status: pending
+
+LINECARRIAGE: Acme supplies industrial fittings.

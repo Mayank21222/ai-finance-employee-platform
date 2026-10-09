@@ -1,0 +1,7 @@
+{
+  "tests/test_dashboard.py::test_all_pages_and_nav_targets_200": true,
+  "tests/test_dashboard.py::test_every_href_on_agents_page_resolves": true,
+  "tests/test_dashboard.py::test_flow_node_panel_returns_html_fragment": true,
+  "tests/test_dashboard.py::test_run_button_flow": true,
+  "tests/test_dashboard_ui.py::test_all_screens_render": true
+}

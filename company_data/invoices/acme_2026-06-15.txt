@@ -1,6 +1,0 @@
-Vendor: Acme Corp
-Invoice Number: ACME-2026-067
-Invoice Date: 2026-06-15
-Amount: INR 38,000.00
-Due Date: 2026-07-15
-Description: Conveyor belt maintenance, June

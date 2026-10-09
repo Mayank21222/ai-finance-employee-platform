@@ -1,0 +1,2 @@
+{"step": 1, "action_type": "tool_call", "tool": "vendor_lookup", "args": {"vendor_name": "Acme Corp"}, "summary": "vendor_lookup -> Vendor Acme Corp: status=active, terms=NET30, bank=HDFC ****1234, tax_id=27AAACA1234A1Z5, email=ap@acme.example", "expected_outcome": "Vendor record showing status, payment terms, and any hold flags", "ts": 1791525060.795}
+{"run_id": "accounts-payable-employee-1791525060006", "request": "Look up vendor Acme Corp", "verification": null, "report": null}

@@ -1,11 +1,6 @@
-# Company Policy — Accounts Payable
+# AP Policy
 
-1. Any invoice with an amount **above INR 50,000** requires a named human
-   approver's confirmation *before* it is entered into the payables system.
-2. Invoices at or below INR 50,000 may be entered without approval.
-3. The invoice record in the payables system must match the source invoice
-   file exactly: vendor name, amount, and due date.
-4. Every entered invoice must be confirmed against the payables system's
-   read API after entry. Do not report completion without that confirmation.
-5. If an invoice file is missing required fields (amount or due date), do not
-   guess — ask a human.
+- Invoices with an amount **above ₹50,000** require a human's approval before they can be posted to the payables system.
+- Invoices at or below ₹50,000 can be posted without approval.
+- Always record the amount and due date exactly as shown on the invoice.
+- The vendor name must match the company's records.

@@ -1,0 +1,6 @@
+Vendor: Acme Corp
+Invoice: INV-002
+Amount: Rs. 18,000
+Currency: INR
+Due date: 2026-06-15
+Status: pending

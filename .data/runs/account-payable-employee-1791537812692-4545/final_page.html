@@ -1,0 +1,10 @@
+<html><head><style>body{font-family:system-ui,sans-serif;margin:2rem}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:.4rem}.popup-overlay{position:fixed;inset:0;background:#eee;z-index:9}input{display:block;margin:.4rem 0}button{margin-top:.6rem}</style></head><body>
+
+<h1>Add invoice</h1>
+<form action="/invoice/new" method="post">
+Invoice#:<input name="invoice_number" type="text">
+Vendor:<input name="vendor" type="text">
+Amount (INR):<input name="amount" type="text">
+Due date:<input name="due_date" type="text" placeholder="YYYY-MM-DD">
+<button type="submit">Submit</button>
+</form><a href="/">Back</a></body></html>
